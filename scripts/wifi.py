@@ -101,5 +101,4 @@ if __name__ == "__main__":
     if logged_in:
         print(f"✓ Logged in as {logged_in}")
     else:
-        print("✗ Login failed")
         print("\n".join(failed))
