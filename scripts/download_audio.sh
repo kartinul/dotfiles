@@ -26,6 +26,18 @@ cleanup() {
 
 trap cleanup EXIT
 
+SQ_THUMB_BIN="$1"
+SQ_EXEC=""
+
+if [ -n "$SQ_THUMB_BIN" ] && [ -f "$SQ_THUMB_BIN" ] && [ -x "$SQ_THUMB_BIN" ]; then
+	SQ_EXEC="$SQ_THUMB_BIN"
+elif command -v sq_thumbnail >/dev/null 2>&1; then
+	SQ_EXEC="sq_thumbnail"
+else
+	STATUS_MSG="✗ sq_thumbnail not found"
+	exit 0
+fi
+
 URL="$(pbpaste | tr -d '\r\n')"
 
 if [ -z "$URL" ] || [[ ! "$URL" =~ ^https?://(www\.)?(youtube\.com|youtu\.be)/ ]]; then
@@ -56,36 +68,10 @@ if ! find "$DL" -type f -name '*.mp3' -print -quit | grep -q .; then
 	exit 0
 fi
 
-detect_border() {
-	python3 -c "
-import sys
-from PIL import Image
-img=Image.open(sys.argv[1]).convert('RGB')
-w,h=img.size
-px=img.load()
-threshold=35
-def d(a,b): return sum((x-y)**2 for x,y in zip(a,b))**0.5
-bc=px[0,h//2]
-def cb(x):
-    ys=range(0,h,max(1,h//30))
-    return sum(d(px[x,y],bc) for y in ys)/len(list(ys))<threshold
-def rb(y):
-    xs=range(0,w,max(1,w//30))
-    return sum(d(px[x,y],bc) for x in xs)/len(list(xs))<threshold
-l=next((x for x in range(w) if not cb(x)),0)
-r=next((x+1 for x in range(w-1,-1,-1) if not cb(x)),w)
-t=next((y for y in range(h) if not rb(y)),0)
-b=next((y+1 for y in range(h-1,-1,-1) if not rb(y)),h)
-print(f'crop={r-l}:{b-t}:{l}:{t}')
-" "$1" 2>/dev/null
-}
-
+# 2. Use the dynamically located executable
 process_image() {
-	local img="$1" out="$2" crop
-	crop=$(detect_border "$img")
-	ffmpeg -y -i "$img" -filter_complex \
-		"[0:v]${crop},split=2[bg][fg];[bg]scale=1000:1000:force_original_aspect_ratio=increase,crop=1000:1000,gblur=sigma=20[bg2];[fg]scale=1000:1000:force_original_aspect_ratio=decrease[fg2];[bg2][fg2]overlay=(W-w)/2:(H-h)/2" \
-		-q:v 1 "$out" >/dev/null 2>&1
+	local img="$1" out="$2"
+	"$SQ_EXEC" "$img" "$out" >/dev/null 2>&1
 }
 
 get_field() {
