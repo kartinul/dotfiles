@@ -1,5 +1,5 @@
 gemini_docs
 .env*
-.proxy_state.json
+.router_state.json
 __pycache__/
 *.pyc
