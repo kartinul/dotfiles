@@ -1,1 +1,5 @@
 gemini_docs
+.env*
+.proxy_state.json
+__pycache__/
+*.pyc

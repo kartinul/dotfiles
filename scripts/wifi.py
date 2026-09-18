@@ -74,7 +74,7 @@ if __name__ == "__main__":
 
     if gateway is None:
         print("✗ No known gateway reachable — not on a recognized branch network")
-        sys.exit(1)
+        sys.exit(0)
 
     SOPHOS_USERNAME, SOPHOS_PASSWORD = credentials
 
