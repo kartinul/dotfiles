@@ -1,0 +1,236 @@
+{
+    "mapping": {
+        "A": {
+            "type": "button",
+            "byte": 13,
+            "bit": 7,
+            "value": 255
+        },
+        "B": {
+            "type": "button",
+            "byte": 12,
+            "bit": 7,
+            "value": 255
+        },
+        "X": {
+            "type": "button",
+            "byte": 14,
+            "bit": 7,
+            "value": 255
+        },
+        "Y": {
+            "type": "button",
+            "byte": 11,
+            "bit": 7,
+            "value": 255
+        },
+        "LB": {
+            "type": "button",
+            "byte": 15,
+            "bit": 7,
+            "value": 255
+        },
+        "RB": {
+            "type": "button",
+            "byte": 16,
+            "bit": 7,
+            "value": 255
+        },
+        "LT": {
+            "type": "axis",
+            "byte": 17,
+            "value": 0
+        },
+        "RT": {
+            "type": "axis",
+            "byte": 18,
+            "value": 0
+        },
+        "Select": {
+            "type": "button",
+            "byte": 1,
+            "bit": 0,
+            "value": 1
+        },
+        "Start": {
+            "type": "button",
+            "byte": 1,
+            "bit": 1,
+            "value": 2
+        },
+        "L3": {
+            "type": "button",
+            "byte": 1,
+            "bit": 2,
+            "value": 4
+        },
+        "R3": {
+            "type": "button",
+            "byte": 1,
+            "bit": 3,
+            "value": 8
+        },
+        "DPad_Up": {
+            "type": "button",
+            "byte": 9,
+            "bit": 7,
+            "value": 255
+        },
+        "DPad_Down": {
+            "type": "button",
+            "byte": 10,
+            "bit": 7,
+            "value": 255
+        },
+        "DPad_Left": {
+            "type": "button",
+            "byte": 8,
+            "bit": 7,
+            "value": 255
+        },
+        "DPad_Right": {
+            "type": "button",
+            "byte": 7,
+            "bit": 7,
+            "value": 255
+        },
+        "LS_X": {
+            "type": "axis",
+            "byte": 3,
+            "value": 127
+        },
+        "LS_Y": {
+            "type": "axis",
+            "byte": 4,
+            "value": 127,
+            "inverted": true
+        },
+        "RS_X": {
+            "type": "axis",
+            "byte": 5,
+            "value": 127
+        },
+        "RS_Y": {
+            "type": "axis",
+            "byte": 6,
+            "value": 127,
+            "inverted": true
+        }
+    },
+    "keybinds": {
+        "A": "z",
+        "B": "a",
+        "X": "x",
+        "Y": "d",
+        "LB": "tab",
+        "RB": "f",
+        "LT": {
+            "key": "s",
+            "mode": "button",
+            "direction": "positive",
+            "threshold": 0.5
+        },
+        "RT": {
+            "key": "c",
+            "mode": "button",
+            "direction": "positive",
+            "threshold": 0.5
+        },
+        "Select": "i",
+        "Start": "esc",
+        "DPad_Up": "up",
+        "DPad_Down": "down",
+        "DPad_Left": "left",
+        "DPad_Right": "right",
+        "LS_X": {
+            "mode": "directions",
+            "directions": {
+                "negative": "left",
+                "positive": "right"
+            },
+            "threshold": 0.5
+        },
+        "LS_Y": {
+            "mode": "directions",
+            "directions": {
+                "positive": "up",
+                "negative": "down"
+            },
+            "threshold": 0.5
+        },
+        "RS_Y": {
+            "mode": "directions",
+            "directions": {
+                "positive": "up",
+                "negative": "down"
+            },
+            "threshold": 0.5
+        }
+    },
+    "games": {
+        "Default": {
+            "keybinds": {}
+        },
+        "Hollow Knight": {
+            "keybinds": {
+                "A": "z",
+                "B": "a",
+                "X": "x",
+                "Y": "d",
+                "LB": "tab",
+                "RB": "f",
+                "LT": {
+                    "key": "s",
+                    "mode": "button",
+                    "direction": "positive",
+                    "threshold": 0.5
+                },
+                "RT": {
+                    "key": "c",
+                    "mode": "button",
+                    "direction": "positive",
+                    "threshold": 0.5
+                },
+                "Select": "i",
+                "Start": "esc",
+                "DPad_Up": "up",
+                "DPad_Down": "down",
+                "DPad_Left": "left",
+                "DPad_Right": "right",
+                "LS_X": {
+                    "mode": "directions",
+                    "directions": {
+                        "negative": "left",
+                        "positive": "right"
+                    },
+                    "threshold": 0.5
+                },
+                "LS_Y": {
+                    "mode": "directions",
+                    "directions": {
+                        "positive": "up",
+                        "negative": "down"
+                    },
+                    "threshold": 0.5
+                },
+                "RS_Y": {
+                    "mode": "directions",
+                    "directions": {
+                        "positive": "up",
+                        "negative": "down"
+                    },
+                    "threshold": 0.5
+                }
+            }
+        }
+    },
+    "ignored_bits": {
+        "19": [
+            1
+        ],
+        "21": [
+            0
+        ]
+    },
+    "active_game": "Hollow Knight"
+}
