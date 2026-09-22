@@ -820,6 +820,7 @@ class GamepadTool:
             elif choice == "4":
                 self.map_keyboard()
             elif choice == "5":
+                self.select_game()
                 self.close()
                 self.run_native_runtime()
                 break

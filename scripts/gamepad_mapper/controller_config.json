@@ -128,13 +128,13 @@
             "key": "s",
             "mode": "button",
             "direction": "positive",
-            "threshold": 0.5
+            "threshold": 0.2
         },
         "RT": {
             "key": "c",
             "mode": "button",
             "direction": "positive",
-            "threshold": 0.5
+            "threshold": 0.2
         },
         "Select": "i",
         "Start": "esc",
@@ -148,7 +148,7 @@
                 "negative": "left",
                 "positive": "right"
             },
-            "threshold": 0.5
+            "threshold": 0.2
         },
         "LS_Y": {
             "mode": "directions",
@@ -156,7 +156,15 @@
                 "positive": "up",
                 "negative": "down"
             },
-            "threshold": 0.5
+            "threshold": 1
+        },
+        "RS_X": {
+            "mode": "directions",
+            "directions": {
+                "negative": "left",
+                "positive": "right"
+            },
+            "threshold": 0.2
         },
         "RS_Y": {
             "mode": "directions",
@@ -164,7 +172,7 @@
                 "positive": "up",
                 "negative": "down"
             },
-            "threshold": 0.5
+            "threshold": 0.2
         }
     },
     "games": {
@@ -183,13 +191,13 @@
                     "key": "s",
                     "mode": "button",
                     "direction": "positive",
-                    "threshold": 0.5
+                    "threshold": 0.2
                 },
                 "RT": {
                     "key": "c",
                     "mode": "button",
                     "direction": "positive",
-                    "threshold": 0.5
+                    "threshold": 0.2
                 },
                 "Select": "i",
                 "Start": "esc",
@@ -203,7 +211,7 @@
                         "negative": "left",
                         "positive": "right"
                     },
-                    "threshold": 0.5
+                    "threshold": 0.2
                 },
                 "LS_Y": {
                     "mode": "directions",
@@ -211,7 +219,15 @@
                         "positive": "up",
                         "negative": "down"
                     },
-                    "threshold": 0.5
+                    "threshold": 1
+                },
+                "RS_X": {
+                    "mode": "directions",
+                    "directions": {
+                        "negative": "left",
+                        "positive": "right"
+                    },
+                    "threshold": 0.2
                 },
                 "RS_Y": {
                     "mode": "directions",
@@ -219,8 +235,54 @@
                         "positive": "up",
                         "negative": "down"
                     },
-                    "threshold": 0.5
+                    "threshold": 0.2
                 }
+            }
+        },
+        "Stardew Valley": {
+            "keybinds": {
+                "RB": "tab",
+                "LB": "m",
+                "R3": "y",
+                "RT": "mouse_wheel_down",
+                "LT": "mouse_wheel_up",
+                "LS_X": {
+                    "mode": "directions",
+                    "directions": {
+                        "negative": "a",
+                        "positive": "d"
+                    },
+                    "threshold": 0.2
+                },
+                "LS_Y": {
+                    "mode": "directions",
+                    "directions": {
+                        "positive": "w",
+                        "negative": "s"
+                    },
+                    "threshold": 0.2
+                },
+                "RS_X": {
+                    "mode": "directions",
+                    "directions": {
+                        "negative": "shift",
+                        "positive": "shift"
+                    },
+                    "threshold": 0.01
+                },
+                "RS_Y": {
+                    "mode": "directions",
+                    "directions": {
+                        "positive": "shift",
+                        "negative": "shift"
+                    },
+                    "threshold": 0.01
+                },
+                "L3": "shift"
+            },
+            "cursor": {
+                "move_before_keyboard_input": true,
+                "position": "right_middle"
             }
         }
     },
