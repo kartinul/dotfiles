@@ -268,6 +268,22 @@
       outline-offset: 2px;
     }
 
+    select {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      color: var(--ink);
+      border-radius: 4px;
+      padding: 2px 8px;
+      font-size: 0.82rem;
+      font-weight: 500;
+      cursor: pointer;
+      height: 28px;
+    }
+
+    select:focus-visible {
+      outline: 2px solid var(--focus);
+    }
+
     .status-slot {
       display: inline-flex;
       align-items: center;
@@ -278,9 +294,18 @@
       flex-shrink: 0;
     }
 
+    .spinner-wrap {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+    }
+
     .spinner {
-      width: 14px;
-      height: 14px;
+      width: 16px;
+      height: 16px;
       border: 2px solid var(--muted);
       border-top-color: var(--ink);
       border-radius: 50%;
@@ -293,6 +318,15 @@
     }
     @keyframes spin {
       to { transform: rotate(360deg); }
+    }
+
+    .spin-count {
+      position: absolute;
+      font-size: 0.65rem;
+      font-weight: 700;
+      color: var(--ink);
+      line-height: 1;
+      pointer-events: none;
     }
 
     .checkmark {
@@ -366,6 +400,10 @@
         <h1>Gemini router <span id="limit-pill" class="flag">0 combos at daily limit</span></h1>
         <div class="status-container">
           <p id="conn" class="muted" role="status">Connecting…</p>
+          <select id="profile-select" aria-label="Routing Profile">
+            <option value="flashspam">flashspam</option>
+            <option value="flashlitespam">flashlitespam</option>
+          </select>
           <button id="test" aria-label="Test all keys and models" disabled>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <polygon points="5 3 19 12 5 21 5 3"></polygon>
@@ -399,15 +437,26 @@
     const clock = s => { s = Math.max(0, Math.floor(s)); return `${pad(Math.floor(s / 3600))}:${pad(Math.floor(s % 3600 / 60))}:${pad(s % 60)}`; };
 
     let stats = null, resetAt = 0, testing = false;
+    let serverTimeOffset = 0;
     const inFlight = {};
     const resultTimeout = {};
 
+    function syncServerTime(serverTime) {
+      if (typeof serverTime === 'number' && !isNaN(serverTime) && serverTime > 0) {
+        serverTimeOffset = (Date.now() / 1000) - serverTime;
+      }
+    }
+
+    function getServerNowSec() {
+      return (Date.now() / 1000) - serverTimeOffset;
+    }
+
     function isDailyCap(s) {
       if (!s || s.unsupported) return false;
-      const lim = stats ? stats.rpd_limit : 20;
+      const lim = (s && s.rpd_limit) ? s.rpd_limit : (stats ? stats.rpd_limit : 20);
       if (s.used >= lim) return true;
-      const nowSec = Date.now() / 1000;
-      if (s.cooldown_ends_at && (s.cooldown_ends_at - nowSec > 1800 || (resetAt && s.cooldown_ends_at >= resetAt - 120))) {
+      const nowSec = getServerNowSec();
+      if (s.cooldown_ends_at && (s.cooldown_ends_at - nowSec > 1800 || (resetAt && s.cooldown_ends_at >= resetAt - 120 && resetAt - nowSec > 300))) {
         return true;
       }
       return false;
@@ -455,11 +504,11 @@
         return;
       }
 
-      const lim = stats.rpd_limit;
+      const lim = (s && s.rpd_limit) ? s.rpd_limit : (stats ? stats.rpd_limit : 20);
       const pct = Math.min(100, s.used / lim * 100);
       const isLimited = s.used >= lim || isDailyCap(s);
       
-      const nowSec = Date.now() / 1000;
+      const nowSec = getServerNowSec();
       const isCooling = s.cooldown_ends_at && s.cooldown_ends_at > nowSec && !isDailyCap(s);
 
       tileEl.className = 'tile' + (isCooling ? ' cool' : '') + (isLimited ? ' limited' : '');
@@ -482,6 +531,19 @@
       if (nEl) {
         nEl.innerHTML = `${s.used}<small>/${lim}</small>`;
       }
+
+      let cdEl = tileEl.querySelector('.countdown');
+      if (isCooling) {
+        const remaining = Math.max(0, Math.ceil(s.cooldown_ends_at - nowSec));
+        if (!cdEl) {
+          cdEl = document.createElement('span');
+          cdEl.className = 'countdown';
+          tileEl.appendChild(cdEl);
+        }
+        cdEl.textContent = `${remaining}s`;
+      } else if (cdEl) {
+        cdEl.remove();
+      }
     }
 
     function updateHeaderPill() {
@@ -490,7 +552,8 @@
       stats.keys.forEach(k => {
         if (!k.blacklisted) {
           Object.values(k.slots).forEach(s => {
-            if (!s.unsupported && s.used >= stats.rpd_limit) {
+            const lim = (s && s.rpd_limit) ? s.rpd_limit : (stats ? stats.rpd_limit : 20);
+            if (!s.unsupported && s.used >= lim) {
               count++;
             }
           });
@@ -504,6 +567,12 @@
     }
 
     function initGrid() {
+      if (stats && stats.active_profile) {
+        const ps = $('#profile-select');
+        if (ps && ps.value !== stats.active_profile) {
+          ps.value = stats.active_profile;
+        }
+      }
       const keys = stats.keys.map(k => ({ ...k, sub: `${k.successful_requests} ok, ${k.failed_requests} failed` }));
       $('#usage').innerHTML = grid(keys, null);
       
@@ -532,12 +601,13 @@
       }
       const infl = getInFlight(key, model);
       if (infl.size > 0) {
-        showSpinner(tileEl, slotEl);
+        showSpinner(tileEl, slotEl, infl.size);
       }
     }
 
-    function showSpinner(tileEl, slotEl) {
-      slotEl.innerHTML = `<span class="spinner"></span>`;
+    function showSpinner(tileEl, slotEl, count = 1) {
+      const countText = count > 0 ? `<span class="spin-count">${count}</span>` : '';
+      slotEl.innerHTML = `<span class="spinner-wrap"><span class="spinner"></span>${countText}</span>`;
     }
 
     function onRequestStarted(id, key, model) {
@@ -548,9 +618,9 @@
       if (!tileEl) return;
       
       const slotEl = tileEl.querySelector('.status-slot');
-      if (slotEl && infl.size === 1) {
+      if (slotEl) {
         if (!resultTimeout[`${key}|${model}`]) {
-          showSpinner(tileEl, slotEl);
+          showSpinner(tileEl, slotEl, infl.size);
         }
       }
     }
@@ -648,6 +718,7 @@
       };
       es.addEventListener('snapshot', e => {
         stats = JSON.parse(e.data);
+        if (stats.server_time) syncServerTime(stats.server_time);
         resetAt = stats.reset_at;
         initGrid();
       });
@@ -660,10 +731,12 @@
       });
       es.addEventListener('request_finished', e => {
         const d = JSON.parse(e.data);
+        if (d.slot && d.slot.server_time) syncServerTime(d.slot.server_time);
         onRequestFinished(d.id, d.key, d.model, d.status, d.latency_ms, d.slot);
       });
       es.addEventListener('slot_changed', e => {
         const d = JSON.parse(e.data);
+        if (d.slot && d.slot.server_time) syncServerTime(d.slot.server_time);
         onSlotChanged(d.key, d.model, d.slot);
       });
       es.addEventListener('key_changed', e => {
@@ -689,10 +762,23 @@
 
     $('#test').addEventListener('click', runTest);
 
+    $('#profile-select').addEventListener('change', async function() {
+      try {
+        const r = await fetch('/profile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profile: this.value })
+        });
+        if (!r.ok) throw new Error(`Server returned ${r.status}`);
+      } catch (err) {
+        alert('Failed to change profile: ' + err.message);
+      }
+    });
+
     // Live ticking countdown for cooling down slots
     setInterval(() => {
       if (!stats) return;
-      const nowSec = Date.now() / 1000;
+      const nowSec = getServerNowSec();
       stats.keys.forEach(k => {
         Object.keys(k.slots).forEach(m => {
           const s = k.slots[m];
@@ -700,9 +786,9 @@
           if (!tileEl) return;
           
           const isCooling = s.cooldown_ends_at && s.cooldown_ends_at > nowSec && !isDailyCap(s);
+          let cdEl = tileEl.querySelector('.countdown');
           if (isCooling) {
             const remaining = Math.max(0, Math.ceil(s.cooldown_ends_at - nowSec));
-            let cdEl = tileEl.querySelector('.countdown');
             if (!cdEl) {
               cdEl = document.createElement('span');
               cdEl.className = 'countdown';
@@ -713,7 +799,6 @@
               tileEl.classList.add('cool');
             }
           } else {
-            const cdEl = tileEl.querySelector('.countdown');
             if (cdEl) cdEl.remove();
             if (tileEl.classList.contains('cool')) {
               tileEl.classList.remove('cool');
@@ -726,10 +811,26 @@
     // Live ticking reset clock
     setInterval(() => {
       if (resetAt) {
-        $('#clock').textContent = clock(resetAt - Date.now() / 1000);
+        $('#clock').textContent = clock(resetAt - getServerNowSec());
       }
     }, 1000);
 
+    async function loadInitialStats() {
+      try {
+        const r = await fetch('/stats');
+        if (r.ok) {
+          const data = await r.json();
+          if (!stats) {
+            stats = data;
+            if (stats.server_time) syncServerTime(stats.server_time);
+            resetAt = stats.reset_at;
+            initGrid();
+          }
+        }
+      } catch (e) {}
+    }
+
+    loadInitialStats();
     connectSSE();
   </script>
 </body>
