@@ -203,6 +203,68 @@ def get_slot_data(key: str, model: str) -> dict:
     )
 
 
+# --- SSE BROADCASTER ---
+class SSEBroadcaster:
+    def __init__(self):
+        self.subscribers = set()
+
+    async def subscribe(self) -> asyncio.Queue:
+        queue = asyncio.Queue(maxsize=100)
+        self.subscribers.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue):
+        self.subscribers.discard(queue)
+
+    async def broadcast(self, event_name: str, data: dict):
+        payload = {
+            "event": event_name,
+            "data": json.dumps(data)
+        }
+        for queue in list(self.subscribers):
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                self.unsubscribe(queue)
+
+
+broadcaster = SSEBroadcaster()
+
+
+def broadcast_bg(event_name: str, data: dict):
+    try:
+        loop = asyncio.get_running_loop()
+        if loop.is_running():
+            loop.create_task(broadcaster.broadcast(event_name, data))
+    except RuntimeError:
+        pass
+
+
+_next_request_id = 0
+
+
+def get_next_request_id() -> int:
+    global _next_request_id
+    _next_request_id += 1
+    return _next_request_id
+
+
+def get_slot_payload(key: str, model: str) -> dict:
+    now = time.time()
+    d = get_slot_data(key, model)
+    return {
+        "used": d["day_count"],
+        "rpm": len([t for t in d["timestamps"] if now - t < 60]),
+        "cooldown_ends_at": d["cooldown_until"] if d["cooldown_until"] > now else 0.0,
+        "unsupported": model in unsupported_slots[key]
+    }
+
+
+async def broadcast_reset_and_snapshot():
+    await broadcaster.broadcast("reset", {})
+    await broadcaster.broadcast("snapshot", get_stats_payload())
+
+
 def roll_day():
     """Zero every daily counter when Pacific midnight passes (also clears stale counts loaded from disk)."""
     global current_day
@@ -216,6 +278,12 @@ def roll_day():
             for d in slots.values():
                 d["day_count"] = 0
         mark_state_dirty()
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                loop.create_task(broadcast_reset_and_snapshot())
+        except RuntimeError:
+            pass
 
 
 roll_day()
@@ -245,6 +313,41 @@ def build_state_snapshot() -> dict:
     return {"pacific_date": current_day, "keys": keys}
 
 
+def get_stats_payload() -> dict:
+    roll_day()
+    now = time.time()
+    reset_at = now + seconds_until_pacific_midnight()
+    keys = []
+    for k in API_KEYS:
+        slots = {}
+        for m in FLASH_FALLBACK_CHAIN:
+            d = get_slot_data(k, m)
+            slots[m] = {
+                "used": d["day_count"],
+                "rpm": len([t for t in d["timestamps"] if now - t < 60]),
+                "cooldown": max(0, round(d["cooldown_until"] - now)),
+                "cooldown_ends_at": d["cooldown_until"] if d["cooldown_until"] > now else 0.0,
+                "unsupported": m in unsupported_slots[k],
+            }
+        keys.append(
+            {
+                "key": mask_key(k),
+                "blacklisted": key_cooldowns[k] > now,
+                **key_stats[k],
+                "slots": slots,
+            }
+        )
+    return {
+        "pacific_date": current_day,
+        "seconds_to_midnight_reset": round(seconds_until_pacific_midnight()),
+        "reset_at": reset_at,
+        "rpm_limit": RPM_LIMIT,
+        "rpd_limit": RPD_LIMIT,
+        "models": FLASH_FALLBACK_CHAIN,
+        "keys": keys,
+    }
+
+
 async def flush_state_loop():
     global _state_dirty
     while True:
@@ -256,6 +359,12 @@ async def flush_state_loop():
             except Exception as e:
                 _state_dirty = True  # retry next tick
                 logger.error(f"Failed to persist router state to {STATE_FILE}: {e}")
+
+
+async def periodic_reset_check_loop():
+    while True:
+        await asyncio.sleep(60.0)
+        roll_day()
 
 
 # --- APP LIFECYCLE ---
@@ -270,13 +379,15 @@ async def lifespan(app: FastAPI):
         timeout=httpx.Timeout(connect=10.0, read=180.0, write=20.0, pool=10.0),
     )
     _flush_task = asyncio.create_task(flush_state_loop())
+    reset_check_task = asyncio.create_task(periodic_reset_check_loop())
     logger.info(
         f"Router up. {len(API_KEYS)} keys, RPM={RPM_LIMIT} RPD={RPD_LIMIT} (per key, per model), http2={HTTP2}."
     )
     yield
     _flush_task.cancel()
+    reset_check_task.cancel()
     try:
-        await _flush_task
+        await asyncio.gather(_flush_task, reset_check_task, return_exceptions=True)
     except asyncio.CancelledError:
         pass
     try:
@@ -366,11 +477,32 @@ def record_success(key: str, model: str):
     get_slot_data(key, model)["day_count"] += 1
     key_stats[key]["successful_requests"] += 1
     mark_state_dirty()
+    
+    m_key = mask_key(key)
+    broadcast_bg("key_changed", {
+        "key": m_key,
+        "blacklisted": key_cooldowns[key] > time.time(),
+        "successful_requests": key_stats[key]["successful_requests"],
+        "failed_requests": key_stats[key]["failed_requests"]
+    })
+    broadcast_bg("slot_changed", {
+        "key": m_key,
+        "model": model,
+        "slot": get_slot_payload(key, model)
+    })
 
 
 def record_failure(key: str):
     key_stats[key]["failed_requests"] += 1
     mark_state_dirty()
+    
+    m_key = mask_key(key)
+    broadcast_bg("key_changed", {
+        "key": m_key,
+        "blacklisted": key_cooldowns[key] > time.time(),
+        "successful_requests": key_stats[key]["successful_requests"],
+        "failed_requests": key_stats[key]["failed_requests"]
+    })
 
 
 def is_retryable(status: int, text: str) -> bool:
@@ -413,6 +545,7 @@ def apply_cooldown(
             "RESOURCE_EXHAUSTED" in error_text and "day" in error_text.lower()
         ):
             cooldown = max(delay, seconds_until_pacific_midnight())
+            data["day_count"] = max(data["day_count"], RPD_LIMIT)
             logger.warning(
                 f"Daily quota exhausted for {model} on {m_key}. Cooldown ~{int(cooldown)}s."
             )
@@ -424,8 +557,8 @@ def apply_cooldown(
         data["cooldown_until"] = now + cooldown
         mark_state_dirty()
     elif status_code == 503:
-        data["cooldown_until"] = now + max(delay, 15.0)
-        logger.warning(f"503 overload for {model} on {m_key}.")
+        data["cooldown_until"] = now + max(delay, 60.0)
+        logger.warning(f"503 overload for {model} on {m_key}. Cooldown 60s.")
         mark_state_dirty()
     elif status_code == 404:
         if (
@@ -452,6 +585,18 @@ def apply_cooldown(
         )
         mark_state_dirty()
 
+    broadcast_bg("slot_changed", {
+        "key": m_key,
+        "model": model,
+        "slot": get_slot_payload(key, model)
+    })
+    broadcast_bg("key_changed", {
+        "key": m_key,
+        "blacklisted": key_cooldowns[key] > time.time(),
+        "successful_requests": key_stats[key]["successful_requests"],
+        "failed_requests": key_stats[key]["failed_requests"]
+    })
+
 
 # --- HEALTH / STATS / DASHBOARD ---
 @app.get("/health")
@@ -467,35 +612,39 @@ async def health_check():
 
 @app.get("/stats")
 async def get_stats():
-    roll_day()
-    now = time.time()
-    keys = []
-    for k in API_KEYS:
-        slots = {}
-        for m in FLASH_FALLBACK_CHAIN:
-            d = get_slot_data(k, m)
-            slots[m] = {
-                "used": d["day_count"],
-                "rpm": len([t for t in d["timestamps"] if now - t < 60]),
-                "cooldown": max(0, round(d["cooldown_until"] - now)),
-                "unsupported": m in unsupported_slots[k],
-            }
-        keys.append(
-            {
-                "key": mask_key(k),
-                "blacklisted": key_cooldowns[k] > now,
-                **key_stats[k],
-                "slots": slots,
-            }
-        )
-    return {
-        "pacific_date": current_day,
-        "seconds_to_midnight_reset": round(seconds_until_pacific_midnight()),
-        "rpm_limit": RPM_LIMIT,
-        "rpd_limit": RPD_LIMIT,
-        "models": FLASH_FALLBACK_CHAIN,
-        "keys": keys,
-    }
+    return get_stats_payload()
+
+
+@app.get("/events")
+async def events_endpoint(request: Request):
+    queue = await broadcaster.subscribe()
+
+    async def event_generator():
+        # On connect, immediately send a "snapshot" event
+        snapshot_data = get_stats_payload()
+        yield f"event: snapshot\ndata: {json.dumps(snapshot_data)}\n\n"
+
+        try:
+            while True:
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield f"event: {payload['event']}\ndata: {payload['data']}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            broadcaster.unsubscribe(queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -514,11 +663,12 @@ async def dashboard():
 @app.get("/v1/models")
 @app.get("/models")
 async def list_models():
+    models = list(ALL_DISCOVERED_MODELS) + ["auto-router", "auto", "default"]
     return {
         "object": "list",
         "data": [
             {"id": m, "object": "model", "created": 1700000000, "owned_by": "google"}
-            for m in ALL_DISCOVERED_MODELS
+            for m in models
         ],
     }
 
@@ -568,6 +718,12 @@ async def create_embeddings(request: Request):
             )
             if not key:
                 break
+            
+            req_id = get_next_request_id()
+            m_key = mask_key(key)
+            await broadcaster.broadcast("request_started", {"id": req_id, "key": m_key, "model": model})
+            request_start_time = time.time()
+
             try:
                 resp = await client.post(
                     EMBED_URL,
@@ -579,6 +735,7 @@ async def create_embeddings(request: Request):
                         "x-goog-api-key": key
                     },  # header, not ?key=, so the key never lands in a URL/log
                 )
+                latency_ms = round((time.time() - request_start_time) * 1000)
                 if resp.status_code == 200:
                     values = resp.json().get("embedding", {}).get("values", [])
                     data_items.append(
@@ -586,12 +743,31 @@ async def create_embeddings(request: Request):
                     )
                     total_tokens += max(1, len(text) // 4)
                     record_success(key, model)
+                    
+                    await broadcaster.broadcast("request_finished", {
+                        "id": req_id,
+                        "key": m_key,
+                        "model": model,
+                        "status": 200,
+                        "latency_ms": latency_ms,
+                        "slot": get_slot_payload(key, model)
+                    })
                     success = True
                     break
+                
                 record_failure(key)
                 apply_cooldown(
                     key, model, resp.status_code, resp.text, dict(resp.headers)
                 )
+                
+                await broadcaster.broadcast("request_finished", {
+                    "id": req_id,
+                    "key": m_key,
+                    "model": model,
+                    "status": resp.status_code,
+                    "latency_ms": latency_ms,
+                    "slot": get_slot_payload(key, model)
+                })
                 excluded_slots.add((key, model))
                 last_error = err_msg(resp.text)
                 if not is_retryable(resp.status_code, resp.text):
@@ -600,6 +776,16 @@ async def create_embeddings(request: Request):
                 record_failure(key)
                 excluded_slots.add((key, model))
                 last_error = str(e) or type(e).__name__
+                latency_ms = round((time.time() - request_start_time) * 1000)
+                
+                await broadcaster.broadcast("request_finished", {
+                    "id": req_id,
+                    "key": m_key,
+                    "model": model,
+                    "status": 500,
+                    "latency_ms": latency_ms,
+                    "slot": get_slot_payload(key, model)
+                })
         if not success:
             raise HTTPException(
                 status_code=502, detail=f"Embedding generation failed: {last_error}"
@@ -646,6 +832,10 @@ async def chat_completions(request: Request):
             f"Attempt {attempt + 1}/{max_retries} -> {model} | {m_key} | RPM {len(slot['timestamps'])}/{RPM_LIMIT} | RPD {slot['day_count']}/{RPD_LIMIT}"
         )
 
+        req_id = get_next_request_id()
+        await broadcaster.broadcast("request_started", {"id": req_id, "key": m_key, "model": model})
+        request_start_time = time.time()
+
         payload = dict(body_json)
         if "thinking_config" in payload:
             tc = payload.pop("thinking_config", {}) or {}
@@ -673,8 +863,18 @@ async def chat_completions(request: Request):
                     data = await resp.aread()
                 finally:
                     await resp.aclose()
+                latency_ms = round((time.time() - request_start_time) * 1000)
                 if resp.status_code < 400:
                     record_success(key, model)
+                    
+                    await broadcaster.broadcast("request_finished", {
+                        "id": req_id,
+                        "key": m_key,
+                        "model": model,
+                        "status": resp.status_code,
+                        "latency_ms": latency_ms,
+                        "slot": get_slot_payload(key, model)
+                    })
                     return Response(
                         content=data,
                         status_code=resp.status_code,
@@ -682,6 +882,15 @@ async def chat_completions(request: Request):
                     )
                 err_text = data.decode("utf-8", errors="replace")
                 record_failure(key)
+                
+                await broadcaster.broadcast("request_finished", {
+                    "id": req_id,
+                    "key": m_key,
+                    "model": model,
+                    "status": resp.status_code,
+                    "latency_ms": latency_ms,
+                    "slot": get_slot_payload(key, model)
+                })
                 if not is_retryable(resp.status_code, err_text):
                     return Response(
                         content=data,
@@ -700,12 +909,21 @@ async def chat_completions(request: Request):
 
             record_success(key, model)
 
-            async def stream_forward(r=resp):
+            async def stream_forward(r=resp, r_id=req_id, r_start=request_start_time):
                 try:
                     async for chunk in r.aiter_bytes():
                         yield chunk
                 finally:
                     await r.aclose()
+                    latency_ms = round((time.time() - r_start) * 1000)
+                    await broadcaster.broadcast("request_finished", {
+                        "id": r_id,
+                        "key": m_key,
+                        "model": model,
+                        "status": 200,
+                        "latency_ms": latency_ms,
+                        "slot": get_slot_payload(key, model)
+                    })
 
             return StreamingResponse(
                 stream_forward(),
@@ -720,6 +938,16 @@ async def chat_completions(request: Request):
         except Exception as e:
             logger.error(f"Request error {m_key}/{model}: {e or type(e).__name__}")
             record_failure(key)
+            latency_ms = round((time.time() - request_start_time) * 1000)
+            
+            await broadcaster.broadcast("request_finished", {
+                "id": req_id,
+                "key": m_key,
+                "model": model,
+                "status": 500,
+                "latency_ms": latency_ms,
+                "slot": get_slot_payload(key, model)
+            })
             excluded_slots.add((key, model))
 
     return Response(
@@ -740,7 +968,13 @@ async def test_all():
     ).encode("utf-8")
 
     async def test_combo(key: str, model: str):
-        m_key, start = mask_key(key), time.time()
+        req_id = get_next_request_id()
+        m_key = mask_key(key)
+        start = time.time()
+
+        # Broadcast request_started!
+        await broadcaster.broadcast("request_started", {"id": req_id, "key": m_key, "model": model})
+
         slot = get_slot_data(key, model)
         slot["timestamps"].append(
             start
@@ -764,14 +998,35 @@ async def test_all():
                 unsupported_slots[key].discard(model)
                 key_cooldowns[key] = 0.0
                 mark_state_dirty()
+
+                # Broadcast request_finished!
+                await broadcaster.broadcast("request_finished", {
+                    "id": req_id,
+                    "key": m_key,
+                    "model": model,
+                    "status": 200,
+                    "latency_ms": latency_ms,
+                    "slot": get_slot_payload(key, model)
+                })
                 return {
                     "key": m_key,
                     "model": model,
                     "status": "ok",
                     "latency_ms": latency_ms,
                 }
+            
             record_failure(key)
             apply_cooldown(key, model, resp.status_code, resp.text, dict(resp.headers))
+
+            # Broadcast request_finished!
+            await broadcaster.broadcast("request_finished", {
+                "id": req_id,
+                "key": m_key,
+                "model": model,
+                "status": resp.status_code,
+                "latency_ms": latency_ms,
+                "slot": get_slot_payload(key, model)
+            })
             return {
                 "key": m_key,
                 "model": model,
@@ -782,21 +1037,33 @@ async def test_all():
             }
         except Exception as e:
             record_failure(key)
+            latency_ms = round((time.time() - start) * 1000)
+
+            # Broadcast request_finished!
+            await broadcaster.broadcast("request_finished", {
+                "id": req_id,
+                "key": m_key,
+                "model": model,
+                "status": 500,
+                "latency_ms": latency_ms,
+                "slot": get_slot_payload(key, model)
+            })
             return {
                 "key": m_key,
                 "model": model,
                 "status": "error",
                 "detail": str(e) or type(e).__name__,
-                "latency_ms": round((time.time() - start) * 1000),
+                "latency_ms": latency_ms,
             }
 
     results = await asyncio.gather(
         *(test_combo(k, m) for k in API_KEYS for m in FLASH_FALLBACK_CHAIN)
     )
+    ok_count = sum(r["status"] == "ok" for r in results)
     return {
+        "ok": True,
         "tested": len(results),
-        "ok": sum(r["status"] == "ok" for r in results),
-        "results": results,
+        "passed": ok_count
     }
 
 
