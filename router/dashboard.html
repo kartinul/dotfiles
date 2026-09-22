@@ -7,37 +7,20 @@
   <title>Gemini router</title>
   <style>
     :root {
-      --bg: #e7ecf0;
-      --surface: #f7f9fa;
-      --ink: #0f1f2c;
-      --muted: #56666f;
-      --line: #c9d3da;
-      --ok: #a9dccf;
-      --warn: #f2d48f;
-      --bad: #f0b3ab;
-      --na: #dbe2e7;
-      --focus: #1a5fd0;
-      --hatch: rgba(15, 31, 44, .28);
-    }
-
-    @media (prefers-color-scheme:dark) {
-      :root {
-        --bg: #0e1a24;
-        --surface: #152530;
-        --ink: #e5edf3;
-        --muted: #93a4b0;
-        --line: #28394a;
-        --ok: #17554b;
-        --warn: #5a4413;
-        --bad: #65261f;
-        --na: #1b2c38;
-        --focus: #7fb0ff;
-        --hatch: rgba(229, 237, 243, .30);
-      }
+      --bg: #000000;
+      --surface: #121212;
+      --ink: #ffffff;
+      --muted: #888888;
+      --line: #222222;
+      --ok: #15803d;
+      --warn: #b45309;
+      --bad: #b91c1c;
+      --na: #1a1a1a;
+      --focus: #3b82f6;
     }
 
     * {
-      box-sizing: border-box
+      box-sizing: border-box;
     }
 
     body {
@@ -45,13 +28,13 @@
       background: var(--bg);
       color: var(--ink);
       font: 15px/1.45 "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
-      font-variant-numeric: tabular-nums
+      font-variant-numeric: tabular-nums;
     }
 
     main {
       max-width: 1120px;
       margin: 0 auto;
-      padding: 28px 16px 64px
+      padding: 28px 16px 64px;
     }
 
     header {
@@ -60,70 +43,64 @@
       align-items: flex-end;
       gap: 16px;
       flex-wrap: wrap;
-      margin-bottom: 6px
+      margin-bottom: 24px;
     }
 
     h1 {
       margin: 0;
       font-size: 1.6rem;
       font-weight: 650;
-      letter-spacing: -.01em
+      letter-spacing: -.01em;
+      display: flex;
+      align-items: center;
+      gap: 12px;
     }
 
-    h2 {
-      margin: 36px 0 4px;
-      font-size: 1.05rem;
-      font-weight: 650
+    .status-container {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 4px;
     }
 
     p {
-      margin: 0
+      margin: 0;
     }
 
     .muted {
-      color: var(--muted)
+      color: var(--muted);
     }
 
     #conn {
-      margin-top: 2px
+      font-size: 0.9rem;
     }
 
     #conn.down {
-      color: #a3271f;
-      font-weight: 600
-    }
-
-    @media (prefers-color-scheme:dark) {
-      #conn.down {
-        color: #ff9d94
-      }
+      color: #ff9d94;
+      font-weight: 600;
     }
 
     .reset {
-      text-align: right
+      text-align: right;
     }
 
     .reset b {
       display: block;
       font-size: 1.9rem;
       font-weight: 600;
-      line-height: 1.1
-    }
-
-    #summary {
-      margin: 14px 0 14px
+      line-height: 1.1;
     }
 
     .scroll {
       overflow-x: auto;
-      padding-bottom: 6px
+      padding-bottom: 6px;
     }
 
     .grid {
       display: grid;
       grid-template-columns: 8.5rem repeat(var(--n), minmax(5.6rem, 1fr));
       gap: 4px;
-      min-width: max-content
+      min-width: max-content;
     }
 
     .grid>.h {
@@ -131,23 +108,23 @@
       color: var(--muted);
       font-size: .85rem;
       align-self: end;
-      white-space: nowrap
+      white-space: nowrap;
     }
 
     .rowlabel {
       padding: 6px 8px 6px 0;
       display: flex;
       flex-direction: column;
-      justify-content: center
+      justify-content: center;
     }
 
     .rowlabel b {
-      font-weight: 650
+      font-weight: 650;
     }
 
     .rowlabel span {
       color: var(--muted);
-      font-size: .85rem
+      font-size: .85rem;
     }
 
     .tile {
@@ -160,57 +137,57 @@
       border-radius: 6px;
       display: flex;
       flex-direction: column;
-      justify-content: space-between
+      justify-content: space-between;
     }
 
-    .tile>* {
-      position: relative
+    .tile-content {
+      position: relative;
+      z-index: 2;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      width: 100%;
     }
 
     .tile .fill {
       position: absolute;
       left: 0;
       right: 0;
-      bottom: 0
+      bottom: 0;
+      transition: height 0.3s ease;
     }
 
     .fill.ok {
-      background: var(--ok)
-    }
-
-    .fill.warn {
-      background: var(--warn)
-    }
-
-    .fill.bad {
-      background: var(--bad)
+      background: var(--ok);
     }
 
     .tile .n {
       font-size: 1.15rem;
       font-weight: 650;
-      line-height: 1.1
+      line-height: 1.1;
+      color: var(--ink);
+      -webkit-text-stroke: 3px var(--surface);
+      paint-order: stroke fill;
+      text-shadow:
+        -1px -1px 0 var(--surface),
+        1px -1px 0 var(--surface),
+        -1px 1px 0 var(--surface),
+        1px 1px 0 var(--surface);
     }
 
     .tile .n small {
       font-size: .8rem;
       font-weight: 500;
-      color: var(--muted)
-    }
-
-    .tile .sub {
-      font-size: .8rem;
       color: var(--muted);
-      min-height: 1.1em
     }
 
     .tile.cool {
-      background-image: repeating-linear-gradient(135deg, var(--warn) 0 7px, transparent 7px 14px)
+      background-image: repeating-linear-gradient(135deg, var(--warn) 0 10px, var(--surface) 10px 20px);
     }
 
-    .tile.cool .sub {
-      color: var(--ink);
-      font-weight: 600
+    .tile.cool .fill,
+    .tile.limited .fill {
+      display: none;
     }
 
     .tile.na,
@@ -218,31 +195,17 @@
       background: var(--na);
       color: var(--muted);
       justify-content: center;
-      font-size: .9rem
+      font-size: .9rem;
     }
 
     .tile.dead {
-      background-image: repeating-linear-gradient(135deg, var(--bad) 0 7px, transparent 7px 14px);
+      background-image: repeating-linear-gradient(135deg, var(--bad) 0 10px, var(--surface) 10px 20px);
       color: var(--ink);
-      font-weight: 600
-    }
-
-    .tile.pass {
-      background: var(--ok)
+      font-weight: 600;
     }
 
     .tile.limited {
-      background: var(--warn)
-    }
-
-    .tile.fail {
-      background: var(--bad)
-    }
-
-    .tile.pass .sub,
-    .tile.limited .sub,
-    .tile.fail .sub {
-      color: var(--ink)
+      background-image: repeating-linear-gradient(135deg, var(--bad) 0 10px, var(--surface) 10px 20px);
     }
 
     .flag {
@@ -253,16 +216,16 @@
       background: var(--bad);
       color: var(--ink);
       font-size: .78rem;
-      font-weight: 600
+      font-weight: 600;
     }
 
     .legend {
       display: flex;
       flex-wrap: wrap;
       gap: 14px;
-      margin-top: 10px;
+      margin-top: 24px;
       color: var(--muted);
-      font-size: .85rem
+      font-size: .85rem;
     }
 
     .legend i {
@@ -272,58 +235,112 @@
       border-radius: 2px;
       margin-right: 5px;
       vertical-align: -1px;
-      border: 1px solid var(--line)
+      border: 1px solid var(--line);
     }
 
     button {
-      margin-top: 12px;
-      padding: 10px 16px;
-      border: 0;
-      border-radius: 6px;
-      background: var(--ink);
-      color: var(--bg);
-      font: inherit;
-      font-weight: 600;
-      cursor: pointer
+      background: transparent;
+      border: 1px solid var(--line);
+      color: var(--ink);
+      border-radius: 4px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      transition: background 0.2s, opacity 0.2s;
+    }
+
+    button:hover:not(:disabled) {
+      background: var(--surface);
+      border-color: var(--muted);
     }
 
     button:disabled {
-      opacity: .55;
-      cursor: progress
+      opacity: .5;
+      cursor: not-allowed;
     }
 
     button:focus-visible {
       outline: 3px solid var(--focus);
-      outline-offset: 2px
+      outline-offset: 2px;
     }
 
-    #note {
-      margin-top: 8px;
-      max-width: 64ch;
-      font-size: .88rem
+    .status-slot {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 16px;
+      height: 16px;
+      margin-left: 4px;
+      flex-shrink: 0;
     }
 
-    #testsum {
-      margin: 16px 0 8px;
+    .spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid var(--muted);
+      border-top-color: var(--ink);
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    @media (prefers-reduced-motion: no-preference) {
+      .spinner {
+        animation: spin 0.8s linear infinite;
+      }
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    .checkmark {
+      width: 14px;
+      height: 14px;
+      color: #10b981;
+      display: inline-block;
+    }
+
+    .checkmark__check {
+      stroke-dasharray: 20;
+      stroke-dashoffset: 0;
+    }
+
+    @media (prefers-reduced-motion: no-preference) {
+      .checkmark__check {
+        stroke-dashoffset: 20;
+        animation: draw 0.3s ease-out forwards;
+      }
+    }
+
+    @keyframes draw {
+      to {
+        stroke-dashoffset: 0;
+      }
+    }
+
+    .countdown {
+      font-size: 0.8rem;
       font-weight: 600;
-      min-height: 1.4em
+      color: var(--ink);
+      position: absolute;
+      right: 9px;
+      bottom: 7px;
+      z-index: 2;
     }
 
-    #fails {
-      margin: 14px 0 0;
-      padding: 0;
-      list-style: none;
-      max-width: 80ch
+    .tile.replace-number .n {
+      display: none !important;
     }
 
-    #fails li {
-      padding: 6px 0;
-      border-top: 1px solid var(--line);
-      font-size: .9rem
-    }
-
-    #fails b {
-      font-weight: 650
+    .tile.replace-number .status-slot {
+      margin-left: 0;
+      width: 100%;
     }
   </style>
 </head>
@@ -332,134 +349,370 @@
   <main>
     <header>
       <div>
-        <h1>Gemini router</h1>
-        <p id="conn" class="muted" role="status">Connecting…</p>
+        <h1>Gemini router <span id="limit-pill" class="flag">0 combos at daily limit</span></h1>
+        <div class="status-container">
+          <p id="conn" class="muted" role="status">Connecting…</p>
+          <button id="test" aria-label="Test all keys and models" disabled>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+              stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+          </button>
+        </div>
       </div>
-      <div class="reset"><b id="clock">--:--:--</b><span class="muted">until quotas reset (midnight Pacific)</span>
+      <div class="reset">
+        <b id="clock">--:--:--</b>
+        <span class="muted">until quotas reset (midnight Pacific)</span>
       </div>
     </header>
 
-    <p id="summary" class="muted"></p>
     <div class="scroll">
       <div id="usage"></div>
     </div>
+
     <div class="legend">
       <span><i style="background:var(--ok)"></i>used today, room left</span>
-      <span><i style="background:var(--warn)"></i>70% or more used</span>
-      <span><i style="background:var(--bad)"></i>daily cap reached</span>
-      <span><i style="background:repeating-linear-gradient(135deg,var(--warn) 0 3px,transparent 3px 6px)"></i>cooling
+      <span><i
+          style="background:repeating-linear-gradient(135deg, var(--warn) 0 3px, var(--surface) 3px 6px)"></i>cooling
         down</span>
+      <span><i style="background:repeating-linear-gradient(135deg, var(--bad) 0 3px, var(--surface) 3px 6px)"></i>daily
+        cap reached</span>
       <span><i style="background:var(--na)"></i>model unavailable for that key</span>
     </div>
-
-    <h2>Test every key and model</h2>
-    <button id="test" disabled>Test all keys and models</button>
-    <p id="note" class="muted"></p>
-    <p id="testsum" aria-live="polite"></p>
-    <div class="scroll">
-      <div id="results"></div>
-    </div>
-    <ul id="fails"></ul>
   </main>
 
   <script>
     const $ = s => document.querySelector(s);
+    const API_BASE = window.location.protocol === 'file:' ? 'http://localhost:9999' : '';
     const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const short = m => m.replace(/^gemini-/, '');
     const pad = n => String(n).padStart(2, '0');
     const clock = s => { s = Math.max(0, Math.floor(s)); return `${pad(Math.floor(s / 3600))}:${pad(Math.floor(s % 3600 / 60))}:${pad(s % 60)}`; };
-    const dur = s => s < 90 ? `${s}s` : s < 5400 ? `${Math.round(s / 60)}m` : `${Math.floor(s / 3600)}h ${Math.round(s % 3600 / 60)}m`;
 
     let stats = null, resetAt = 0, testing = false;
+    const inFlight = {};
+    const resultTimeout = {};
+
+    function getInFlight(key, model) {
+      if (!inFlight[key]) inFlight[key] = {};
+      if (!inFlight[key][model]) inFlight[key][model] = new Set();
+      return inFlight[key][model];
+    }
 
     function grid(rows, tile) {
-      const head = '<div class="h"></div>' + stats.models.map(m => `<div class="h" title="${esc(m)}">${esc(short(m))}</div>`).join('');
-      const body = rows.map(r => `<div class="rowlabel"><b>${esc(r.key)}${r.blacklisted ? '<span class="flag">blacklisted</span>' : ''}</b><span>${esc(r.sub)}</span></div>` +
-        stats.models.map(m => tile(r, m)).join('')).join('');
+      const head = '<div class="h"></div>' + stats.models.map(m => `<div class="h">${esc(short(m))}</div>`).join('');
+      const body = rows.map(r => {
+        const rowId = `row-${r.key}`;
+        return `<div class="rowlabel" id="${rowId}">` +
+          `<b>${esc(r.key)}${r.blacklisted ? '<span class="flag">blacklisted</span>' : ''}</b>` +
+          `<span class="sub-label">${esc(r.sub)}</span>` +
+          `</div>` +
+          stats.models.map(m => {
+            const tileId = `tile-${r.key}-${m}`;
+            return `<div class="tile" id="${tileId}"></div>`;
+          }).join('');
+      }).join('');
       return `<div class="grid" style="--n:${stats.models.length}">${head}${body}</div>`;
     }
 
-    function usageTile(k, m) {
-      const s = k.slots[m], lim = stats.rpd_limit;
-      if (k.blacklisted) return `<div class="tile dead" title="This key is blacklisted">blocked</div>`;
-      if (s.unsupported) return `<div class="tile na" title="${esc(m)} isn't available on this key">n/a</div>`;
-      const pct = Math.min(100, s.used / lim * 100), lvl = pct >= 100 ? 'bad' : pct >= 70 ? 'warn' : 'ok';
-      const sub = s.cooldown > 0 ? `wait ${dur(s.cooldown)}` : s.rpm ? `${s.rpm}/${stats.rpm_limit} per min` : '';
-      return `<div class="tile${s.cooldown > 0 ? ' cool' : ''}" title="${esc(m)}: ${s.used} of ${lim} used today, ${s.rpm} of ${stats.rpm_limit} this minute">` +
-        `<i class="fill ${lvl}" style="height:${pct}%"></i><span class="n">${s.used}<small>/${lim}</small></span><span class="sub">${sub}</span></div>`;
+    function updateTileState(key, model) {
+      const k = stats.keys.find(x => x.key === key);
+      if (!k) return;
+      const s = k.slots[model];
+      if (!s) return;
+
+      const tileEl = document.getElementById(`tile-${key}-${model}`);
+      if (!tileEl) return;
+
+      if (k.blacklisted) {
+        tileEl.className = 'tile dead';
+        tileEl.innerHTML = 'blocked';
+        return;
+      }
+      if (s.unsupported) {
+        tileEl.className = 'tile na';
+        tileEl.innerHTML = 'n/a';
+        return;
+      }
+
+      const lim = stats.rpd_limit;
+      const pct = Math.min(100, s.used / lim * 100);
+      const isLimited = s.used >= lim;
+
+      const nowSec = Date.now() / 1000;
+      const isCooling = s.cooldown_ends_at && s.cooldown_ends_at > nowSec;
+
+      tileEl.className = 'tile' + (isCooling ? ' cool' : '') + (isLimited ? ' limited' : '');
+
+      if (!tileEl.querySelector('.tile-content')) {
+        tileEl.innerHTML = `<i class="fill" style="height:0%"></i>` +
+          `<div class="tile-content">` +
+          `<span class="n"></span>` +
+          `<span class="status-slot"></span>` +
+          `</div>`;
+      }
+
+      const fillEl = tileEl.querySelector('.fill');
+      if (fillEl) {
+        fillEl.style.height = `${pct}%`;
+        fillEl.className = 'fill ok';
+      }
+
+      const nEl = tileEl.querySelector('.n');
+      if (nEl) {
+        nEl.innerHTML = `${s.used}<small>/${lim}</small>`;
+      }
     }
 
-    function render() {
+    function updateHeaderPill() {
+      if (!stats) return;
+      let count = 0;
+      stats.keys.forEach(k => {
+        if (!k.blacklisted) {
+          Object.values(k.slots).forEach(s => {
+            if (!s.unsupported && s.used >= stats.rpd_limit) {
+              count++;
+            }
+          });
+        }
+      });
+      const pill = $('#limit-pill');
+      if (pill) {
+        pill.textContent = `${count} combo${count === 1 ? '' : 's'} at daily limit`;
+        pill.style.background = count > 0 ? 'var(--bad)' : 'var(--na)';
+      }
+    }
+
+    function initGrid() {
       const keys = stats.keys.map(k => ({ ...k, sub: `${k.successful_requests} ok, ${k.failed_requests} failed` }));
-      const used = keys.reduce((a, k) => a + Object.values(k.slots).reduce((b, s) => b + s.used, 0), 0);
-      $('#summary').textContent = `${used} requests used today across ${keys.length} ${keys.length === 1 ? 'key' : 'keys'} and ${stats.models.length} models. ` +
-        `Each key and model gets ${stats.rpd_limit} per day and ${stats.rpm_limit} per minute.`;
-      $('#usage').innerHTML = grid(keys, usageTile);
-      const n = keys.length * stats.models.length;
-      $('#note').textContent = `Sends ${n} real requests, one per key and model, and counts them against today's quota. ` +
-        `A passing test clears that combo's cooldown, unavailable and blacklist flags.`;
+      $('#usage').innerHTML = grid(keys, null);
+
+      stats.keys.forEach(k => {
+        Object.keys(k.slots).forEach(m => {
+          updateTileState(k.key, m);
+        });
+      });
+      updateHeaderPill();
       if (!testing) $('#test').disabled = false;
     }
 
     function setConn(up) {
       const c = $('#conn');
       c.className = up ? 'muted' : 'down';
-      c.textContent = up ? 'Live, refreshing every 3 seconds' : 'Router not reachable. Start router.py; this page reconnects on its own.';
+      c.textContent = up ? 'Live' : 'Router not reachable. Start router.py; this page reconnects on its own.';
     }
 
-    async function refresh() {
-      try {
-        const r = await fetch('/stats', { cache: 'no-store' });
-        if (!r.ok) throw new Error(r.status);
-        stats = await r.json();
-        resetAt = Date.now() / 1000 + stats.seconds_to_midnight_reset;
-        setConn(true); render();
-      } catch (e) { setConn(false); }
+    function clearTileResult(key, model) {
+      const tileEl = document.getElementById(`tile-${key}-${model}`);
+      if (!tileEl) return;
+      tileEl.classList.remove('replace-number');
+      const slotEl = tileEl.querySelector('.status-slot');
+      if (slotEl) {
+        slotEl.innerHTML = '';
+      }
+      const infl = getInFlight(key, model);
+      if (infl.size > 0) {
+        showSpinner(tileEl, slotEl);
+      }
     }
 
-    function showResults(d) {
-      const by = {};
-      d.results.forEach(r => by[r.key + '|' + r.model] = r);
-      const rows = stats.keys.map(k => {
-        const mine = d.results.filter(r => r.key === k.key);
-        return { key: k.key, sub: `${mine.filter(r => r.status === 'ok').length} of ${mine.length} passed` };
-      });
-      const tile = (row, m) => {
-        const r = by[row.key + '|' + m];
-        if (!r) return '<div class="tile na">not run</div>';
-        if (r.status === 'ok') return `<div class="tile pass"><span class="n">Pass</span><span class="sub">${r.latency_ms} ms</span></div>`;
-        if (r.code === 429) return '<div class="tile limited"><span class="n">Limited</span><span class="sub">429</span></div>';
-        return `<div class="tile fail"><span class="n">Failed</span><span class="sub">${esc(r.code || 'no response')}</span></div>`;
+    function showSpinner(tileEl, slotEl) {
+      slotEl.innerHTML = `<span class="spinner"></span>`;
+    }
+
+    function onRequestStarted(id, key, model) {
+      const infl = getInFlight(key, model);
+      infl.add(id);
+
+      const tileEl = document.getElementById(`tile-${key}-${model}`);
+      if (!tileEl) return;
+
+      const slotEl = tileEl.querySelector('.status-slot');
+      if (slotEl && infl.size === 1) {
+        if (!resultTimeout[`${key}|${model}`]) {
+          showSpinner(tileEl, slotEl);
+        }
+      }
+    }
+
+    function onRequestFinished(id, key, model, status, latency, slot) {
+      const infl = getInFlight(key, model);
+      infl.delete(id);
+
+      if (stats) {
+        const k = stats.keys.find(x => x.key === key);
+        if (k) {
+          k.slots[model] = slot;
+        }
+      }
+
+      updateTileState(key, model);
+
+      const tileEl = document.getElementById(`tile-${key}-${model}`);
+      if (!tileEl) return;
+
+      const slotEl = tileEl.querySelector('.status-slot');
+      if (!slotEl) return;
+
+      let resultHTML = '';
+      if (status === 200) {
+        resultHTML = `<svg class="checkmark" viewBox="0 0 12 12"><path class="checkmark__check" fill="none" stroke="currentColor" stroke-width="2" d="M2 6l3 3 5-6" /></svg>`;
+      } else {
+        const code = status || 'ERR';
+        const isAmber = code === 429;
+        const color = isAmber ? 'var(--warn)' : 'var(--bad)';
+        resultHTML = `<span style="color:${color}; font-weight:700; font-size:0.85rem;">${code}</span>`;
+      }
+
+      slotEl.innerHTML = resultHTML;
+
+      const nEl = tileEl.querySelector('.n');
+      if (nEl) {
+        const doesNotFit = (nEl.offsetWidth + 20) > tileEl.clientWidth;
+        if (doesNotFit) {
+          tileEl.classList.add('replace-number');
+        }
+      }
+
+      const timeoutKey = `${key}|${model}`;
+      if (resultTimeout[timeoutKey]) {
+        clearTimeout(resultTimeout[timeoutKey]);
+      }
+
+      resultTimeout[timeoutKey] = setTimeout(() => {
+        delete resultTimeout[timeoutKey];
+        clearTileResult(key, model);
+      }, 750);
+    }
+
+    function onSlotChanged(key, model, slot) {
+      if (stats) {
+        const k = stats.keys.find(x => x.key === key);
+        if (k) {
+          k.slots[model] = slot;
+        }
+      }
+      updateTileState(key, model);
+      updateHeaderPill();
+    }
+
+    function onKeyChanged(key, blacklisted, successful, failed) {
+      if (stats) {
+        const k = stats.keys.find(x => x.key === key);
+        if (k) {
+          k.blacklisted = blacklisted;
+          k.successful_requests = successful;
+          k.failed_requests = failed;
+        }
+      }
+      const rowEl = document.getElementById(`row-${key}`);
+      if (rowEl) {
+        rowEl.innerHTML = `<b>${esc(key)}${blacklisted ? '<span class="flag">blacklisted</span>' : ''}</b>` +
+          `<span class="sub-label">${esc(successful)} ok, ${esc(failed)} failed</span>`;
+      }
+      if (stats) {
+        stats.models.forEach(m => {
+          updateTileState(key, m);
+        });
+      }
+      updateHeaderPill();
+    }
+
+    let es = null;
+    function connectSSE() {
+      if (es) es.close();
+      es = new EventSource(`${API_BASE}/events`);
+      es.onopen = () => {
+        setConn(true);
       };
-      const limited = d.results.filter(r => r.code === 429).length, failed = d.results.length - d.ok - limited;
-      $('#testsum').textContent = `${d.ok} of ${d.tested} passed, ${limited} rate limited, ${failed} failed.`;
-      $('#results').innerHTML = grid(rows, tile);
-      $('#fails').innerHTML = d.results.filter(r => r.status !== 'ok').map(r =>
-        `<li><b>${esc(r.key)} on ${esc(short(r.model))}</b> ${esc(r.code || '')} ${esc(r.detail || '')}</li>`).join('');
+      es.onerror = () => {
+        setConn(false);
+      };
+      es.addEventListener('snapshot', e => {
+        stats = JSON.parse(e.data);
+        resetAt = stats.reset_at;
+        initGrid();
+      });
+      es.addEventListener('reset', e => {
+        // followed by snapshot
+      });
+      es.addEventListener('request_started', e => {
+        const d = JSON.parse(e.data);
+        onRequestStarted(d.id, d.key, d.model);
+      });
+      es.addEventListener('request_finished', e => {
+        const d = JSON.parse(e.data);
+        onRequestFinished(d.id, d.key, d.model, d.status, d.latency_ms, d.slot);
+      });
+      es.addEventListener('slot_changed', e => {
+        const d = JSON.parse(e.data);
+        onSlotChanged(d.key, d.model, d.slot);
+      });
+      es.addEventListener('key_changed', e => {
+        const d = JSON.parse(e.data);
+        onKeyChanged(d.key, d.blacklisted, d.successful_requests, d.failed_requests);
+      });
     }
 
     async function runTest() {
       const n = stats.keys.length * stats.models.length;
       if (!confirm(`Send ${n} test requests? They count against today's quota.`)) return;
       const btn = $('#test');
-      testing = true; btn.disabled = true; btn.textContent = `Testing ${n} combinations…`;
-      $('#testsum').textContent = ''; $('#fails').innerHTML = '';
+      testing = true; btn.disabled = true;
       try {
-        const r = await fetch('/test-all', { method: 'POST' });
+        const r = await fetch(`${API_BASE}/test-all`, { method: 'POST' });
         if (!r.ok) throw new Error(`router returned ${r.status}`);
-        showResults(await r.json());
       } catch (e) {
-        $('#testsum').textContent = `Test failed: ${e.message}. Check that router.py is still running.`;
+        alert(`Test failed: ${e.message}`);
       } finally {
-        testing = false; btn.disabled = false; btn.textContent = 'Test all keys and models';
-        refresh();
+        testing = false; btn.disabled = false;
       }
     }
 
     $('#test').addEventListener('click', runTest);
-    setInterval(() => { $('#clock').textContent = clock(resetAt - Date.now() / 1000); }, 1000);
-    setInterval(refresh, 3000);
-    refresh();
+
+    // Live ticking countdown for cooling down slots
+    setInterval(() => {
+      if (!stats) return;
+      const nowSec = Date.now() / 1000;
+      stats.keys.forEach(k => {
+        Object.keys(k.slots).forEach(m => {
+          const s = k.slots[m];
+          const tileEl = document.getElementById(`tile-${k.key}-${m}`);
+          if (!tileEl) return;
+
+          const isCooling = s.cooldown_ends_at && s.cooldown_ends_at > nowSec;
+          if (isCooling) {
+            const remaining = Math.max(0, Math.ceil(s.cooldown_ends_at - nowSec));
+            let cdEl = tileEl.querySelector('.countdown');
+            if (!cdEl) {
+              cdEl = document.createElement('span');
+              cdEl.className = 'countdown';
+              tileEl.appendChild(cdEl);
+            }
+            cdEl.textContent = `${remaining}s`;
+            if (!tileEl.classList.contains('cool')) {
+              tileEl.classList.add('cool');
+            }
+          } else {
+            const cdEl = tileEl.querySelector('.countdown');
+            if (cdEl) cdEl.remove();
+            if (tileEl.classList.contains('cool')) {
+              tileEl.classList.remove('cool');
+            }
+          }
+        });
+      });
+    }, 1000);
+
+    // Live ticking reset clock
+    setInterval(() => {
+      if (resetAt) {
+        $('#clock').textContent = clock(resetAt - Date.now() / 1000);
+      }
+    }, 1000);
+
+    connectSSE();
   </script>
 </body>
 
