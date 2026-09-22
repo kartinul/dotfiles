@@ -53,6 +53,7 @@ private final class Runtime {
     private var bindings: [String: Binding] = [:]
     private var pressedKeys: Set<CGKeyCode> = []
     private var lastValues: [String: Double] = [:]
+    private var moveCursorBeforeKeyboardInput = false
     private var shutdownSource: DispatchSourceSignal?
     private var vendorID: Int { configuredInt("HID_VENDOR_ID", default: 0x2563) }
     private var productID: Int { configuredInt("HID_PRODUCT_ID", default: 0x0575) }
@@ -60,6 +61,7 @@ private final class Runtime {
 
     func start() throws {
         try loadConfig()
+        printConfigSummary()
 
         manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
         let matching: [String: Any] = [
@@ -127,6 +129,11 @@ private final class Runtime {
            let game = games[activeGame] as? [String: Any],
            let gameKeybinds = game["keybinds"] as? [String: Any] {
             keybindObject = gameKeybinds
+            if let cursor = game["cursor"] as? [String: Any],
+               cursor["move_before_keyboard_input"] as? Bool == true,
+               cursor["position"] as? String == "right_middle" {
+                moveCursorBeforeKeyboardInput = true
+            }
         }
         guard let keybindObject else { return }
 
@@ -148,6 +155,55 @@ private final class Runtime {
                 directions: directions
             )
         }
+    }
+
+    private func printConfigSummary() {
+        var lines: [(String, String)] = []
+
+        for (name, binding) in bindings {
+            if let key = binding.key {
+                lines.append((key, name))
+                continue
+            }
+
+            let directions = binding.directions.keys.sorted { lhs, rhs in
+                let lhsOrder = lhs == "positive" ? 0 : 1
+                let rhsOrder = rhs == "positive" ? 0 : 1
+                return lhsOrder < rhsOrder
+            }
+            for direction in directions {
+                guard let key = binding.directions[direction] else { continue }
+                let arrow: String
+                if name.hasSuffix("_Y") {
+                    arrow = direction == "positive" ? "↑" : "↓"
+                } else {
+                    arrow = direction == "positive" ? "→" : "←"
+                }
+                lines.append((key, name + " " + arrow))
+            }
+        }
+
+        if lines.isEmpty {
+            print("Keyboard bindings: (none configured)")
+            return
+        }
+
+        let sortedLines = lines.sorted { lhs, rhs in
+            if lhs.1 == rhs.1 { return lhs.0 < rhs.0 }
+            return lhs.1 < rhs.1
+        }
+        let controllerWidth = max("Controller".count, sortedLines.map { $0.1.count }.max() ?? 0)
+        let keyWidth = max("Keyboard Key".count, sortedLines.map { $0.0.count }.max() ?? 0)
+        let border = "+-\(String(repeating: "-", count: controllerWidth))-+-\(String(repeating: "-", count: keyWidth))-+"
+
+        print("Keyboard bindings")
+        print(border)
+        print("| \("Controller".padding(toLength: controllerWidth, withPad: " ", startingAt: 0)) | \("Keyboard Key".padding(toLength: keyWidth, withPad: " ", startingAt: 0)) |")
+        print(border)
+        for (key, controller) in sortedLines {
+            print("| \(controller.padding(toLength: controllerWidth, withPad: " ", startingAt: 0)) | \(key.padding(toLength: keyWidth, withPad: " ", startingAt: 0)) |")
+        }
+        print(border)
     }
 
     private func handle(report: UnsafeMutablePointer<UInt8>, length: Int) {
@@ -197,8 +253,15 @@ private final class Runtime {
     private func update(key: String, active: Bool, stateKey: String) {
         let previous = lastValues[stateKey] ?? 0
         let wasActive = previous > 0.5
-        guard active != wasActive else { return }
         lastValues[stateKey] = active ? 1 : 0
+
+        if key == "mouse_wheel_down" || key == "mouse_wheel_up" {
+            guard active && !wasActive else { return }
+            postScroll(delta: key == "mouse_wheel_down" ? -1 : 1)
+            return
+        }
+
+        guard active != wasActive else { return }
 
         guard let keyCode = keyCode(for: key) else { return }
         if active {
@@ -213,7 +276,28 @@ private final class Runtime {
     }
 
     private func post(keyCode: CGKeyCode, down: Bool) {
+        if moveCursorBeforeKeyboardInput {
+            moveCursorToRightMiddle()
+        }
         guard let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: down) else { return }
+        event.post(tap: .cghidEventTap)
+    }
+
+    private func moveCursorToRightMiddle() {
+        let bounds = CGDisplayBounds(CGMainDisplayID())
+        let position = CGPoint(x: bounds.maxX - 1, y: bounds.midY)
+        CGWarpMouseCursorPosition(position)
+    }
+
+    private func postScroll(delta: Int32) {
+        guard let event = CGEvent(
+            scrollWheelEvent2Source: nil,
+            units: .line,
+            wheelCount: 1,
+            wheel1: delta,
+            wheel2: 0,
+            wheel3: 0
+        ) else { return }
         event.post(tap: .cghidEventTap)
     }
 
