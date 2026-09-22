@@ -166,13 +166,13 @@
       font-weight: 650;
       line-height: 1.1;
       color: var(--ink);
-      -webkit-text-stroke: 3px var(--surface);
+      -webkit-text-stroke: 1.5px var(--surface);
       paint-order: stroke fill;
-      text-shadow:
-        -1px -1px 0 var(--surface),
-        1px -1px 0 var(--surface),
-        -1px 1px 0 var(--surface),
-        1px 1px 0 var(--surface);
+      text-shadow: 
+        -1px -1px 0 var(--surface),  
+         1px -1px 0 var(--surface),
+        -1px  1px 0 var(--surface),
+         1px  1px 0 var(--surface);
     }
 
     .tile .n small {
@@ -286,17 +286,13 @@
       border-radius: 50%;
       display: inline-block;
     }
-
     @media (prefers-reduced-motion: no-preference) {
       .spinner {
         animation: spin 0.8s linear infinite;
       }
     }
-
     @keyframes spin {
-      to {
-        transform: rotate(360deg);
-      }
+      to { transform: rotate(360deg); }
     }
 
     .checkmark {
@@ -305,39 +301,57 @@
       color: #10b981;
       display: inline-block;
     }
-
     .checkmark__check {
       stroke-dasharray: 20;
       stroke-dashoffset: 0;
     }
-
     @media (prefers-reduced-motion: no-preference) {
       .checkmark__check {
         stroke-dashoffset: 20;
         animation: draw 0.3s ease-out forwards;
       }
     }
-
     @keyframes draw {
-      to {
-        stroke-dashoffset: 0;
-      }
+      to { stroke-dashoffset: 0; }
     }
 
     .countdown {
-      font-size: 0.8rem;
-      font-weight: 600;
+      font-size: 0.85rem;
+      font-weight: 700;
       color: var(--ink);
       position: absolute;
       right: 9px;
       bottom: 7px;
       z-index: 2;
+      -webkit-text-stroke: 1.5px var(--surface);
+      paint-order: stroke fill;
+      text-shadow: 
+        -1px -1px 0 var(--surface),  
+         1px -1px 0 var(--surface),
+        -1px  1px 0 var(--surface),
+         1px  1px 0 var(--surface);
+    }
+
+    .err-badge {
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: var(--bad); /* Use --bad for error color */
+      position: absolute;
+      right: 9px;
+      bottom: 7px;
+      z-index: 2;
+      -webkit-text-stroke: 1.5px var(--surface);
+      paint-order: stroke fill;
+      text-shadow:
+        -1px -1px 0 var(--surface),
+         1px -1px 0 var(--surface),
+        -1px  1px 0 var(--surface),
+         1px  1px 0 var(--surface);
     }
 
     .tile.replace-number .n {
       display: none !important;
     }
-
     .tile.replace-number .status-slot {
       margin-left: 0;
       width: 100%;
@@ -353,8 +367,7 @@
         <div class="status-container">
           <p id="conn" class="muted" role="status">Connecting…</p>
           <button id="test" aria-label="Test all keys and models" disabled>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
-              stroke-linecap="round" stroke-linejoin="round">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <polygon points="5 3 19 12 5 21 5 3"></polygon>
             </svg>
           </button>
@@ -372,18 +385,14 @@
 
     <div class="legend">
       <span><i style="background:var(--ok)"></i>used today, room left</span>
-      <span><i
-          style="background:repeating-linear-gradient(135deg, var(--warn) 0 3px, var(--surface) 3px 6px)"></i>cooling
-        down</span>
-      <span><i style="background:repeating-linear-gradient(135deg, var(--bad) 0 3px, var(--surface) 3px 6px)"></i>daily
-        cap reached</span>
+      <span><i style="background:repeating-linear-gradient(135deg, var(--warn) 0 3px, var(--surface) 3px 6px)"></i>cooling down</span>
+      <span><i style="background:repeating-linear-gradient(135deg, var(--bad) 0 3px, var(--surface) 3px 6px)"></i>daily cap reached</span>
       <span><i style="background:var(--na)"></i>model unavailable for that key</span>
     </div>
   </main>
 
   <script>
     const $ = s => document.querySelector(s);
-    const API_BASE = window.location.protocol === 'file:' ? 'http://localhost:9999' : '';
     const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const short = m => m.replace(/^gemini-/, '');
     const pad = n => String(n).padStart(2, '0');
@@ -392,6 +401,17 @@
     let stats = null, resetAt = 0, testing = false;
     const inFlight = {};
     const resultTimeout = {};
+
+    function isDailyCap(s) {
+      if (!s || s.unsupported) return false;
+      const lim = stats ? stats.rpd_limit : 20;
+      if (s.used >= lim) return true;
+      const nowSec = Date.now() / 1000;
+      if (s.cooldown_ends_at && (s.cooldown_ends_at - nowSec > 1800 || (resetAt && s.cooldown_ends_at >= resetAt - 120))) {
+        return true;
+      }
+      return false;
+    }
 
     function getInFlight(key, model) {
       if (!inFlight[key]) inFlight[key] = {};
@@ -406,11 +426,11 @@
         return `<div class="rowlabel" id="${rowId}">` +
           `<b>${esc(r.key)}${r.blacklisted ? '<span class="flag">blacklisted</span>' : ''}</b>` +
           `<span class="sub-label">${esc(r.sub)}</span>` +
-          `</div>` +
-          stats.models.map(m => {
-            const tileId = `tile-${r.key}-${m}`;
-            return `<div class="tile" id="${tileId}"></div>`;
-          }).join('');
+        `</div>` +
+        stats.models.map(m => {
+          const tileId = `tile-${r.key}-${m}`;
+          return `<div class="tile" id="${tileId}"></div>`;
+        }).join('');
       }).join('');
       return `<div class="grid" style="--n:${stats.models.length}">${head}${body}</div>`;
     }
@@ -437,18 +457,18 @@
 
       const lim = stats.rpd_limit;
       const pct = Math.min(100, s.used / lim * 100);
-      const isLimited = s.used >= lim;
-
+      const isLimited = s.used >= lim || isDailyCap(s);
+      
       const nowSec = Date.now() / 1000;
-      const isCooling = s.cooldown_ends_at && s.cooldown_ends_at > nowSec;
+      const isCooling = s.cooldown_ends_at && s.cooldown_ends_at > nowSec && !isDailyCap(s);
 
       tileEl.className = 'tile' + (isCooling ? ' cool' : '') + (isLimited ? ' limited' : '');
 
       if (!tileEl.querySelector('.tile-content')) {
         tileEl.innerHTML = `<i class="fill" style="height:0%"></i>` +
           `<div class="tile-content">` +
-          `<span class="n"></span>` +
-          `<span class="status-slot"></span>` +
+            `<span class="n"></span>` +
+            `<span class="status-slot"></span>` +
           `</div>`;
       }
 
@@ -486,7 +506,7 @@
     function initGrid() {
       const keys = stats.keys.map(k => ({ ...k, sub: `${k.successful_requests} ok, ${k.failed_requests} failed` }));
       $('#usage').innerHTML = grid(keys, null);
-
+      
       stats.keys.forEach(k => {
         Object.keys(k.slots).forEach(m => {
           updateTileState(k.key, m);
@@ -523,10 +543,10 @@
     function onRequestStarted(id, key, model) {
       const infl = getInFlight(key, model);
       infl.add(id);
-
+      
       const tileEl = document.getElementById(`tile-${key}-${model}`);
       if (!tileEl) return;
-
+      
       const slotEl = tileEl.querySelector('.status-slot');
       if (slotEl && infl.size === 1) {
         if (!resultTimeout[`${key}|${model}`]) {
@@ -559,9 +579,7 @@
         resultHTML = `<svg class="checkmark" viewBox="0 0 12 12"><path class="checkmark__check" fill="none" stroke="currentColor" stroke-width="2" d="M2 6l3 3 5-6" /></svg>`;
       } else {
         const code = status || 'ERR';
-        const isAmber = code === 429;
-        const color = isAmber ? 'var(--warn)' : 'var(--bad)';
-        resultHTML = `<span style="color:${color}; font-weight:700; font-size:0.85rem;">${code}</span>`;
+        resultHTML = `<span class="err-badge">${code}</span>`;
       }
 
       slotEl.innerHTML = resultHTML;
@@ -621,7 +639,7 @@
     let es = null;
     function connectSSE() {
       if (es) es.close();
-      es = new EventSource(`${API_BASE}/events`);
+      es = new EventSource('/events');
       es.onopen = () => {
         setConn(true);
       };
@@ -660,7 +678,7 @@
       const btn = $('#test');
       testing = true; btn.disabled = true;
       try {
-        const r = await fetch(`${API_BASE}/test-all`, { method: 'POST' });
+        const r = await fetch('/test-all', { method: 'POST' });
         if (!r.ok) throw new Error(`router returned ${r.status}`);
       } catch (e) {
         alert(`Test failed: ${e.message}`);
@@ -680,8 +698,8 @@
           const s = k.slots[m];
           const tileEl = document.getElementById(`tile-${k.key}-${m}`);
           if (!tileEl) return;
-
-          const isCooling = s.cooldown_ends_at && s.cooldown_ends_at > nowSec;
+          
+          const isCooling = s.cooldown_ends_at && s.cooldown_ends_at > nowSec && !isDailyCap(s);
           if (isCooling) {
             const remaining = Math.max(0, Math.ceil(s.cooldown_ends_at - nowSec));
             let cdEl = tileEl.querySelector('.countdown');
