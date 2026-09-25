@@ -1,0 +1,28 @@
+[user]
+	name = kartinul
+	email = kartik.nul@gmail.com
+	signingkey = /Users/kartinul/.ssh/github.pub
+[init]
+	defaultBranch = main
+[fetch]
+	prune = true
+[pull]
+	rebase = false
+[push]
+	autoSetupRemote = true
+[core]
+	autocrlf = input
+[alias]
+	st = status
+	co = checkout
+	br = branch
+	cm = commit
+	last = log -1 HEAD
+	lg = log --oneline --graph --decorate --all
+	unstage = reset HEAD --
+	ssh = "!f() { url=$(git remote get-url origin); case \"$url\" in https://github.com/*) repo=${url#https://github.com/}; repo=${repo%.git}; git remote set-url origin \"git@github.com:${repo}.git\"; echo \"origin switched to SSH -> git@github.com:${repo}.git\";; *) echo \"origin is not a github https url: $url\";; esac; }; f"
+	http = "!f() { url=$(git remote get-url origin); case \"$url\" in git@github.com:*) repo=${url#git@github.com:}; repo=${repo%.git}; git remote set-url origin \"https://github.com/${repo}.git\"; echo \"origin switched to HTTPS -> https://github.com/${repo}.git\";; *) echo \"origin is not a github ssh url: $url\";; esac; }; f"
+[gpg]
+	format = ssh
+[commit]
+	gpgsign = true

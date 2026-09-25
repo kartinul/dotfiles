@@ -1,0 +1,59 @@
+# --- Changing Focus ---
+# change window focus within space
+alt - j : yabai -m window --focus south
+alt - k : yabai -m window --focus north
+alt - h : yabai -m window --focus west
+alt - l : yabai -m window --focus east
+
+# --- Modify Layout ---
+
+# rotate layout clockwis
+rcmd - r : yabai -m space --rotate 270
+
+# flip along y-axis
+rcmd - y : yabai -m space --mirror y-axis
+
+# flip along x-axis
+rcmd - x : yabai -m space --mirror x-axis
+
+# --- Moving Windows Arround ---
+
+# swap windows within space
+rcmd - j : yabai -m window --swap south
+rcmd - k : yabai -m window --swap north
+rcmd - h : yabai -m window --swap west
+rcmd - l : yabai -m window --swap east
+
+# fullscreen the current Yabai tile
+fn - f : yabai -m window --toggle zoom-fullscreen ; \
+          yabai -m window --focus $(yabai -m query --windows --window | jq -r '.id')
+
+# toggle window float
+rcmd - t : yabai -m window --toggle float --grid 4:4:1:1:2:2 ; \
+           yabai -m window --focus $(yabai -m query --windows --window | jq -r '.id')
+
+## Resize window left / shrink right
+fn - h : yabai -m window --resize left:-30:0 ; yabai -m window --resize right:-30:0
+fn - j : yabai -m window --resize bottom:0:30 ; yabai -m window --resize top:0:30
+fn - k : yabai -m window --resize top:0:-30 ; yabai -m window --resize bottom:0:-30
+fn - l : yabai -m window --resize right:30:0 ; yabai -m window --resize left:30:0
+
+#move window to prev and next space
+rcmd + shift - p : yabai -m window --space prev;
+rcmd + shift - n : yabai -m window --space next;
+
+# Apps
+rcmd - return : ghostty;
+rcmd - w : open -na Safari;
+rcmd - c : open -a "Visual Studio Code";
+rcmd - f : open -a "Finder";
+
+# move window to space #
+rcmd - 1 : yabai -m window --space 1;
+rcmd - 2 : yabai -m window --space 2; 
+rcmd - 3 : yabai -m window --space 3;
+rcmd - 4 : yabai -m window --space 4;
+rcmd - 5 : yabai -m window --space 5;
+rcmd - 6 : yabai -m window --space 6;
+rcmd - 7 : yabai -m window --space 7;
+#
