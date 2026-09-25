@@ -1,9 +1,11 @@
+import math
 import os
 import re
 import json
 import time
 import asyncio
 import logging
+import random
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Request, HTTPException
@@ -17,11 +19,12 @@ from config import (
     PROFILES,
     DEFAULT_PROFILE,
     MODEL_OVERLOAD_COOLDOWN,
-    RPM_COOLDOWN,
+    DEFAULT_RPM_COOLDOWN,
     BLACKLIST_COOLDOWN,
     DEFAULT_MODEL_CONFIG,
     get_model_config,
-    FLASH_FALLBACK_CHAIN,
+    get_profile_config,
+    get_profile_models,
     DEFAULT_EMBEDDING_MODEL,
     ALL_DISCOVERED_MODELS,
     RPM_LIMIT,
@@ -33,6 +36,7 @@ from config import (
     CHAT_URL,
     EMBED_URL,
     RATE_LIMITED,
+    TIMEOUT_ERROR,
     RETRY_STATUSES,
     BASE_DIR,
     STATE_FILE,
@@ -249,7 +253,7 @@ def get_stats_payload() -> dict:
     now = time.time()
     reset_at = now + seconds_until_pacific_midnight()
     keys = []
-    display_chain = PROFILES.get(active_profile, FLASH_FALLBACK_CHAIN)
+    display_chain = get_profile_models(active_profile)
     for k in API_KEYS:
         slots = {}
         for m in display_chain:
@@ -303,13 +307,18 @@ async def periodic_reset_check_loop():
         roll_day()
 
 async def acquire_slot(
-    chain: list[str], excluded_slots: set | None = None
+    chain: list[str],
+    excluded_slots: set | None = None,
+    excluded_models: set[str] | None = None,
 ) -> tuple[str | None, str | None]:
     excluded_slots = excluded_slots or set()
+    excluded_models = excluded_models or set()
     async with slot_lock:
         roll_day()
         now = time.time()
         for model in chain:
+            if model in excluded_models:
+                continue
             if now < model_cooldowns.get(model, 0.0):
                 continue
             rpm, rpd = limits_for(model)
@@ -372,8 +381,85 @@ def err_msg(text: str) -> str:
         pass
     return " ".join(str(text).split())[:200]
 
+def slot_is_usable(key: str, model: str, now: float) -> bool:
+    if (
+        now < model_cooldowns.get(model, 0.0)
+        or now < key_cooldowns.get(key, 0.0)
+        or model in unsupported_slots.get(key, set())
+    ):
+        return False
+    data = get_slot_data(key, model)
+    if now < data["cooldown_until"]:
+        return False
+    rpm, rpd = limits_for(model)
+    if data["day_count"] >= rpd:
+        return False
+    return len([timestamp for timestamp in data["timestamps"] if now - timestamp < 60]) < rpm
+
+
+def quarantine_profile_slots(
+    key: str, model: str, profile_name: str, delay: float
+) -> set[str]:
+    percent = float(get_profile_config(profile_name)["overload_quarantine_percent"])
+    if percent <= 0:
+        return set()
+
+    now = time.time()
+    usable_keys = {key}
+    usable_keys.update(
+        candidate
+        for candidate in API_KEYS
+        if candidate != key and slot_is_usable(candidate, model, now)
+    )
+    quarantine_count = min(
+        len(usable_keys),
+        max(1, math.ceil(len(usable_keys) * percent / 100)),
+    )
+    additional_count = quarantine_count - 1
+    additional_keys = random.sample(
+        [candidate for candidate in API_KEYS if candidate in usable_keys and candidate != key],
+        additional_count,
+    )
+    quarantined_keys = {key, *additional_keys}
+    cooldown_until = now + max(delay, MODEL_OVERLOAD_COOLDOWN)
+    for candidate in quarantined_keys:
+        data = get_slot_data(candidate, model)
+        data["cooldown_until"] = max(data["cooldown_until"], cooldown_until)
+
+    mark_state_dirty()
+    for candidate in quarantined_keys:
+        broadcast_bg(
+            "slot_changed",
+            {
+                "key": mask_key(candidate),
+                "model": model,
+                "slot": get_slot_payload(candidate, model),
+            },
+        )
+    logger.warning(
+        f"Overload for {model}: quarantined {len(quarantined_keys)}/{len(usable_keys)} usable key slots for {int(max(delay, MODEL_OVERLOAD_COOLDOWN))}s using profile {profile_name}."
+    )
+    return quarantined_keys
+
+
+def is_overload_failure(
+    status_code: int, error_text: str, is_timeout: bool = False
+) -> bool:
+    return (
+        is_timeout
+        or 500 <= status_code < 600
+        or "overloaded" in (error_text or "").lower()
+    )
+
+
 def apply_cooldown(
-    key: str, model: str, status_code: int, error_text: str, headers: dict
+    key: str,
+    model: str,
+    status_code: int,
+    error_text: str,
+    headers: dict,
+    profile_name: str | None = None,
+    is_timeout: bool = False,
 ):
     m_key = mask_key(key)
     delay = 0.0
@@ -391,23 +477,27 @@ def apply_cooldown(
     now = time.time()
     data = get_slot_data(key, model)
 
-    if status_code in (500, 502, 503, 504) or "overloaded" in error_text.lower():
-        model_cooldown = now + max(delay, MODEL_OVERLOAD_COOLDOWN)
-        model_cooldowns[model] = model_cooldown
-        for k in API_KEYS:
-            get_slot_data(k, model)["cooldown_until"] = max(
-                get_slot_data(k, model)["cooldown_until"], model_cooldown
+    if is_overload_failure(status_code, error_text, is_timeout):
+        if profile_name is None:
+            model_cooldown = now + max(delay, MODEL_OVERLOAD_COOLDOWN)
+            model_cooldowns[model] = model_cooldown
+            for candidate in API_KEYS:
+                candidate_data = get_slot_data(candidate, model)
+                candidate_data["cooldown_until"] = max(
+                    candidate_data["cooldown_until"], model_cooldown
+                )
+            logger.warning(
+                f"Overload [{status_code}] for {model}. Model blocked across ALL keys for {int(max(delay, MODEL_OVERLOAD_COOLDOWN))}s."
             )
-        logger.warning(
-            f"Overload [{status_code}] for {model}. Model blocked across ALL keys for {int(max(delay, MODEL_OVERLOAD_COOLDOWN))}s."
-        )
-        mark_state_dirty()
-        for k in API_KEYS:
-            broadcast_bg("slot_changed", {
-                "key": mask_key(k),
-                "model": model,
-                "slot": get_slot_payload(k, model),
-            })
+            mark_state_dirty()
+            for candidate in API_KEYS:
+                broadcast_bg("slot_changed", {
+                    "key": mask_key(candidate),
+                    "model": model,
+                    "slot": get_slot_payload(candidate, model),
+                })
+        else:
+            quarantine_profile_slots(key, model, profile_name, delay)
     elif status_code == 429:
         _, rpd = limits_for(model)
         if "PerDay" in error_text or (
@@ -417,7 +507,12 @@ def apply_cooldown(
             data["day_count"] = max(data["day_count"], rpd)
             logger.warning(f"Daily quota hit for {model} on {m_key}. Cooldown ~{int(cooldown)}s.")
         else:
-            cooldown = max(delay, RPM_COOLDOWN)
+            rpm_cooldown = (
+                float(get_profile_config(profile_name)["rpm_cooldown"])
+                if profile_name is not None
+                else DEFAULT_RPM_COOLDOWN
+            )
+            cooldown = max(delay, rpm_cooldown)
             logger.warning(f"RPM limit hit for {model} on {m_key}. Cooldown {cooldown:.1f}s.")
         data["cooldown_until"] = now + cooldown
         mark_state_dirty()
@@ -710,7 +805,7 @@ async def set_active_profile(request: Request):
 @app.get("/api/v1/models")
 @app.get("/api/models")
 async def list_models():
-    models = list(ALL_DISCOVERED_MODELS) + ["auto-router", "auto", "default", "flashspam", "flashlitespam"]
+    models = list(ALL_DISCOVERED_MODELS) + ["auto-router", "auto", "default"] + list(PROFILES.keys())
     data = []
     for m in models:
         cfg = get_model_config(m)
@@ -773,7 +868,7 @@ async def ollama_show(request: Request):
 
 @app.get("/api/tags")
 async def ollama_tags():
-    models = list(ALL_DISCOVERED_MODELS) + ["auto-router", "auto", "default", "flashspam", "flashlitespam"]
+    models = list(ALL_DISCOVERED_MODELS) + ["auto-router", "auto", "default"] + list(PROFILES.keys())
     return {
         "models": [
             {
@@ -811,15 +906,20 @@ async def server_props():
         "total_slots": len(API_KEYS),
     }
 
-def resolve_fallback_chain(requested: str) -> list[str]:
-    active_chain = PROFILES.get(active_profile, FLASH_FALLBACK_CHAIN)
-    if requested in PROFILES:
-        return PROFILES[requested]
-    if requested in ("auto-router", "auto", "default", ""):
-        return active_chain
+def resolve_profile(requested: str) -> str:
+    return requested if requested in PROFILES else active_profile
+
+
+def resolve_fallback_chain(
+    requested: str, profile_name: str | None = None
+) -> list[str]:
+    profile_name = profile_name or resolve_profile(requested)
+    chain = get_profile_models(profile_name)
+    if requested in ("auto-router", "auto", "default", "") or requested in PROFILES:
+        return chain
     if requested in MODEL_CONFIGS and not MODEL_CONFIGS[requested].get("is_embedding"):
-        return [requested] + [m for m in active_chain if m != requested]
-    return active_chain
+        return [requested] + [model for model in chain if model != requested]
+    return chain
 
 @app.post("/v1/chat/completions")
 @app.post("/chat/completions")
@@ -834,16 +934,28 @@ async def chat_completions(request: Request):
         raise HTTPException(status_code=400, detail="Body must be a JSON object")
 
     requested = str(body_json.get("model", "")).replace("models/", "")
-    chain = resolve_fallback_chain(requested)
+    profile_name = resolve_profile(requested)
+    chain = resolve_fallback_chain(requested, profile_name)
     is_stream = bool(body_json.get("stream", False))
     max_retries = min(len(API_KEYS) * len(chain), 30)
     excluded_slots: set = set()
+    excluded_models: set[str] = set()
     last_status, last_content = 429, json.dumps(RATE_LIMITED).encode()
     client: httpx.AsyncClient = request.app.state.client
 
     for attempt in range(max_retries):
-        key, model = await acquire_slot(chain=chain, excluded_slots=excluded_slots)
+        key, model = await acquire_slot(
+            chain=chain,
+            excluded_slots=excluded_slots,
+            excluded_models=excluded_models,
+        )
         if not key:
+            if last_status == 504:
+                return Response(
+                    content=last_content,
+                    status_code=last_status,
+                    media_type="application/json",
+                )
             return JSONResponse(status_code=429, content=RATE_LIMITED)
 
         m_key = mask_key(key)
@@ -892,9 +1004,17 @@ async def chat_completions(request: Request):
                     )
 
                 err_text = data.decode("utf-8", errors="replace")
+                overload_failure = is_overload_failure(resp.status_code, err_text)
                 record_failure(key)
                 logger.warning(f"Upstream [{resp.status_code}] {m_key}/{model}: {err_msg(err_text)}")
-                apply_cooldown(key, model, resp.status_code, err_text, dict(resp.headers))
+                apply_cooldown(
+                    key,
+                    model,
+                    resp.status_code,
+                    err_text,
+                    dict(resp.headers),
+                    profile_name=profile_name,
+                )
 
                 await broadcaster.broadcast(
                     "request_finished",
@@ -907,21 +1027,64 @@ async def chat_completions(request: Request):
                         "slot": get_slot_payload(key, model),
                     },
                 )
-                if not is_retryable(resp.status_code, err_text):
+                if not is_retryable(resp.status_code, err_text) and not overload_failure:
                     return Response(content=data, status_code=resp.status_code, media_type="application/json")
 
                 excluded_slots.add((key, model))
+                if overload_failure:
+                    excluded_models.add(model)
                 last_status, last_content = resp.status_code, data
                 continue
 
-            record_success(key, model)
-
             async def stream_forward(r=resp, r_id=req_id, r_start=request_start_time):
+                terminal = False
                 try:
                     async for chunk in r.aiter_bytes():
                         yield chunk
-                finally:
-                    await r.aclose()
+                except httpx.TimeoutException as e:
+                    terminal = True
+                    record_failure(key)
+                    apply_cooldown(
+                        key,
+                        model,
+                        500,
+                        str(e),
+                        {},
+                        profile_name=profile_name,
+                        is_timeout=True,
+                    )
+                    latency_ms = round((time.time() - r_start) * 1000)
+                    await broadcaster.broadcast(
+                        "request_finished",
+                        {
+                            "id": r_id,
+                            "key": m_key,
+                            "model": model,
+                            "status": 500,
+                            "latency_ms": latency_ms,
+                            "slot": get_slot_payload(key, model),
+                        },
+                    )
+                    raise
+                except Exception as e:
+                    terminal = True
+                    record_failure(key)
+                    latency_ms = round((time.time() - r_start) * 1000)
+                    await broadcaster.broadcast(
+                        "request_finished",
+                        {
+                            "id": r_id,
+                            "key": m_key,
+                            "model": model,
+                            "status": 500,
+                            "latency_ms": latency_ms,
+                            "slot": get_slot_payload(key, model),
+                        },
+                    )
+                    raise
+                else:
+                    terminal = True
+                    record_success(key, model)
                     latency_ms = round((time.time() - r_start) * 1000)
                     await broadcaster.broadcast(
                         "request_finished",
@@ -934,6 +1097,21 @@ async def chat_completions(request: Request):
                             "slot": get_slot_payload(key, model),
                         },
                     )
+                finally:
+                    if not terminal:
+                        latency_ms = round((time.time() - r_start) * 1000)
+                        await broadcaster.broadcast(
+                            "request_finished",
+                            {
+                                "id": r_id,
+                                "key": m_key,
+                                "model": model,
+                                "status": 499,
+                                "latency_ms": latency_ms,
+                                "slot": get_slot_payload(key, model),
+                            },
+                        )
+                    await r.aclose()
 
             return StreamingResponse(
                 stream_forward(),
@@ -942,9 +1120,20 @@ async def chat_completions(request: Request):
                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
             )
         except Exception as e:
+            is_timeout = isinstance(e, httpx.TimeoutException)
+            if is_timeout:
+                last_status, last_content = 504, json.dumps(TIMEOUT_ERROR).encode()
             logger.error(f"Request error {m_key}/{model}: {e or type(e).__name__}")
             record_failure(key)
-            apply_cooldown(key, model, 500, str(e), {})
+            apply_cooldown(
+                key,
+                model,
+                500 if is_timeout else 0,
+                str(e),
+                {},
+                profile_name=profile_name,
+                is_timeout=is_timeout,
+            )
             latency_ms = round((time.time() - request_start_time) * 1000)
             await broadcaster.broadcast(
                 "request_finished",
@@ -958,6 +1147,8 @@ async def chat_completions(request: Request):
                 },
             )
             excluded_slots.add((key, model))
+            if is_timeout:
+                excluded_models.add(model)
 
     return Response(content=last_content, status_code=last_status, media_type="application/json")
 
@@ -1067,6 +1258,8 @@ async def create_embeddings(request: Request):
 
 @app.post("/test-all")
 async def test_all(request: Request):
+    profile_name = active_profile
+    chain = get_profile_models(profile_name)
     client: httpx.AsyncClient = request.app.state.client
     payload = lambda model: json.dumps(
         {"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
@@ -1109,7 +1302,14 @@ async def test_all(request: Request):
                 return {"key": m_key, "model": model, "status": "ok", "latency_ms": latency_ms}
 
             record_failure(key)
-            apply_cooldown(key, model, resp.status_code, resp.text, dict(resp.headers))
+            apply_cooldown(
+                key,
+                model,
+                resp.status_code,
+                resp.text,
+                dict(resp.headers),
+                profile_name=profile_name,
+            )
             await broadcaster.broadcast(
                 "request_finished",
                 {
@@ -1130,7 +1330,17 @@ async def test_all(request: Request):
                 "latency_ms": latency_ms,
             }
         except Exception as e:
+            is_timeout = isinstance(e, httpx.TimeoutException)
             record_failure(key)
+            apply_cooldown(
+                key,
+                model,
+                500 if is_timeout else 0,
+                str(e),
+                {},
+                profile_name=profile_name,
+                is_timeout=is_timeout,
+            )
             latency_ms = round((time.time() - start) * 1000)
             await broadcaster.broadcast(
                 "request_finished",
@@ -1151,7 +1361,6 @@ async def test_all(request: Request):
                 "latency_ms": latency_ms,
             }
 
-    chain = PROFILES.get(active_profile, FLASH_FALLBACK_CHAIN)
     results = await asyncio.gather(*(test_combo(k, m) for k in API_KEYS for m in chain))
     ok_count = sum(r["status"] == "ok" for r in results)
     return {"ok": True, "tested": len(results), "passed": ok_count}

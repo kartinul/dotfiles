@@ -1,1 +1,4 @@
-background-blur = false
+background-blur = 10
+background-opacity = 0.85
+
+keybind = unconsumed:super+,=text:ghostty +edit-config\n

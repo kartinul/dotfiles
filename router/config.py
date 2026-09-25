@@ -1,3 +1,4 @@
+import math
 import os
 import re
 from dotenv import load_dotenv
@@ -100,26 +101,85 @@ MODEL_CONFIGS = {
 }
 
 PROFILES = {
-    "flashspam": [
-        "gemini-3.8-flash",
-        "gemini-3.7-flash",
-        "gemini-3.6-flash",
-        "gemini-3.5-flash",
-        "gemini-2.5-flash",
-        "gemini-3.5-flash-lite",
-        "gemini-2.5-flash-lite",
-    ],
-    "flashlitespam": [
-        "gemini-3.5-flash-lite",
-        "gemini-2.5-flash-lite",
-    ],
+    "flashspam": {
+        "models": [
+            "gemini-3.8-flash",
+            "gemini-3.7-flash",
+            "gemini-3.6-flash",
+            "gemini-3.5-flash",
+            "gemini-2.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-2.5-flash-lite",
+        ],
+        "overload_quarantine_percent": 50,
+        "rpm_cooldown": 60.0,
+    },
+    "flashlitespam": {
+        "models": [
+            "gemini-3.5-flash-lite",
+            "gemini-2.5-flash-lite",
+        ],
+        "overload_quarantine_percent": 50,
+        "rpm_cooldown": 60.0,
+    },
 }
 
 DEFAULT_PROFILE = "flashspam"
 
 MODEL_OVERLOAD_COOLDOWN = 30.0
-RPM_COOLDOWN = 60.0
+DEFAULT_RPM_COOLDOWN = 60.0
 BLACKLIST_COOLDOWN = 86400.0 * 30
+
+
+def get_profile_config(profile: str) -> dict:
+    return PROFILES.get(profile, PROFILES[DEFAULT_PROFILE])
+
+
+def get_profile_models(profile: str) -> list[str]:
+    return get_profile_config(profile)["models"]
+
+
+def _validate_profile_configs():
+    if DEFAULT_PROFILE not in PROFILES:
+        raise ValueError(f"Default profile not found: {DEFAULT_PROFILE}")
+    for name, config in PROFILES.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("Profile names must be non-empty strings")
+        if not isinstance(config, dict):
+            raise ValueError(f"Profile {name} must be a dictionary")
+        models = config.get("models")
+        if not isinstance(models, list) or not models:
+            raise ValueError(f"Profile {name} must have a non-empty model list")
+        if any(not isinstance(model, str) for model in models):
+            raise ValueError(f"Profile {name} model names must be strings")
+        if len(models) != len(set(models)):
+            raise ValueError(f"Profile {name} contains duplicate models")
+        if any(
+            model not in MODEL_CONFIGS or MODEL_CONFIGS[model].get("is_embedding")
+            for model in models
+        ):
+            raise ValueError(f"Profile {name} contains an invalid model")
+        percent = config.get("overload_quarantine_percent")
+        if (
+            isinstance(percent, bool)
+            or not isinstance(percent, (int, float))
+            or not math.isfinite(percent)
+            or not 0 <= percent <= 100
+        ):
+            raise ValueError(
+                f"Profile {name} overload_quarantine_percent must be between 0 and 100"
+            )
+        rpm_cooldown = config.get("rpm_cooldown")
+        if (
+            isinstance(rpm_cooldown, bool)
+            or not isinstance(rpm_cooldown, (int, float))
+            or not math.isfinite(rpm_cooldown)
+            or rpm_cooldown < 0
+        ):
+            raise ValueError(f"Profile {name} rpm_cooldown must be non-negative")
+
+
+_validate_profile_configs()
 
 DEFAULT_MODEL_CONFIG = {
     "rpm": 5,
@@ -159,7 +219,14 @@ RATE_LIMITED = {
         "code": 429,
     }
 }
-RETRY_STATUSES = {429, 500, 502, 503, 504, 404, 401, 403}
+TIMEOUT_ERROR = {
+    "error": {
+        "message": "Upstream request timed out.",
+        "type": "timeout_error",
+        "code": 504,
+    }
+}
+RETRY_STATUSES = {429, 404, 401, 403} | set(range(500, 600))
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.environ.get(
