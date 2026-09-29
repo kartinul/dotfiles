@@ -39,6 +39,7 @@ yabai -m rule --add app="^Amphetamine$" manage=off
 yabai -m rule --add app="^BetterDisplay$" manage=off
 yabai -m rule --add app="^boringNotch$" manage=off
 yabai -m rule --add app="^Cloudflare WARP$" manage=off
+yabai -m rule --add app="^Crisp$" manage=off
 yabai -m rule --add app="^Deskflow$" manage=off
 yabai -m rule --add app="^Docker$" manage=off
 yabai -m rule --add app="^HuionTablet$" manage=off
@@ -46,10 +47,13 @@ yabai -m rule --add app="^Ice$" manage=off
 yabai -m rule --add app="^Karabiner-Elements$" manage=off
 yabai -m rule --add app="^Karabiner-EventViewer$" manage=off
 yabai -m rule --add app="^LinearMouse$" manage=off
+yabai -m rule --add app="^LapPay$" manage=off
 yabai -m rule --add app="^Maccy$" manage=off
 yabai -m rule --add app="^Ollama$" manage=off
+yabai -m rule --add app="^Secretive$" manage=off
 yabai -m rule --add app="^Stats$" manage=off
-yabai -m rule --add app="^v2RayTun$" manage=off
+yabai -m rule --add app="^WhichSpace$" manage=off
+yabai -m rule --add app="^V2Box$" manage=off
 yabai -m rule --add app="^uBlock Origin Lite$" manage=off
 
 # Overlays, Quick Access & Utilities
@@ -66,8 +70,12 @@ yabai -m rule --add app="^Unity Hub$" manage=off
 yabai -m rule --add app="^Whisky$" manage=off
 
 # Games & Virtual Machines
+yabai -m rule --add app="^Puck$" manage=off
+yabai -m rule --add app="^Factorio$" manage=off
 yabai -m rule --add app="^Geometry Dash$" manage=off
+yabai -m rule --add app="^Hollow Knight$" manage=off
 yabai -m rule --add app="^Roblox$" manage=off
+yabai -m rule --add app="^Stardew Valley$" manage=off
 yabai -m rule --add app="^UTM$" manage=off
 
 # Media Players & Complex Multi-Panel Creative Tools
@@ -77,5 +85,6 @@ yabai -m rule --add app="^YouTube Music$" manage=off
 yabai -m rule --add app="^GarageBand$" manage=off
 yabai -m rule --add app="^iMovie$" manage=off
 yabai -m rule --add app="^Audacity$" manage=off
+yabai -m rule --add app="^Blender$" manage=off
 yabai -m rule --add app="^OBS$" manage=off
 yabai -m rule --add app="^krita$" manage=off

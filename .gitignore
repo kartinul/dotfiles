@@ -3,3 +3,6 @@ gemini_docs
 .router_state.json
 __pycache__/
 *.pyc
+
+karabiner/.config/karabiner/automatic_backups
+karabiner/.config/karabiner/assets
