@@ -121,6 +121,40 @@ class GamepadTool:
             finally:
                 self.dev = None
 
+    def rumble(self, left=0, right=0, duration=0.5):
+        """Send a rumble command. left/right are 0-255, duration in seconds."""
+        if self.dev is None:
+            return
+        cfg = self.config.get("rumble", {})
+        report_id = cfg.get("report_id", 0x02)
+        left_byte = cfg.get("left_motor_byte", 2)
+        right_byte = cfg.get("right_motor_byte", 3)
+        size = cfg.get("packet_size", 8)
+
+        pkt = [0] * size
+        pkt[0] = report_id
+        pkt[left_byte] = max(0, min(255, int(left)))
+        pkt[right_byte] = max(0, min(255, int(right)))
+        self.dev.write(bytes(pkt))
+        if duration > 0:
+            time.sleep(duration)
+            self.stop_rumble()
+
+    def stop_rumble(self):
+        """Stop rumble immediately."""
+        if self.dev is None:
+            return
+        cfg = self.config.get("rumble", {})
+        left_byte = cfg.get("left_motor_byte", 2)
+        right_byte = cfg.get("right_motor_byte", 3)
+        size = cfg.get("packet_size", 8)
+
+        pkt = [0] * size
+        pkt[0] = cfg.get("report_id", 0x02)
+        pkt[left_byte] = 0
+        pkt[right_byte] = 0
+        self.dev.write(bytes(pkt))
+
     def get_baseline(self, samples=20, delay=0.01):
         """Return a representative idle packet, filtering short-lived noise."""
         baselines = []

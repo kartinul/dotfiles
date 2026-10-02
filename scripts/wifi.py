@@ -1,5 +1,4 @@
-#!/usr/local/bin/python3
-
+#!/usr/bin/env python3
 import os
 import sys
 import time
@@ -7,9 +6,10 @@ import html
 import requests
 from io import BytesIO
 import xml.etree.ElementTree as ET
+import subprocess
 
 
-class Sophos():
+class Sophos:
     GATEWAY = "http://172.16.68.6:8090/"
     LOGIN_LINK = "login.xml"
     LOGOUT_LINK = "logout.xml"
@@ -24,6 +24,24 @@ class Sophos():
         except requests.RequestException:
             return False
 
+    @staticmethod
+    def dismiss_portal(gateways: list, wait: float = 3.0) -> None:
+        # macOS only: the captive portal window blocks other processes
+        if sys.platform != "darwin":
+            return
+        res = subprocess.run(
+            ["pkill", "-f", "Captive Network Assistant"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if res.returncode != 0:
+            return  # popup wasn't open, nothing to wait for
+        end = time.time() + wait
+        while time.time() < end:
+            if any(gw.test(0.3) for gw in gateways):
+                return
+            time.sleep(0.02)
+
     def login(self, user: str, pswd: str) -> str:
         LINK = self.GATEWAY + self.LOGIN_LINK
         data = {
@@ -31,7 +49,7 @@ class Sophos():
             "username": user,
             "password": pswd,
             "a": self.__getmilliepoch(),
-            "producttype": "0"
+            "producttype": "0",
         }
         resp = requests.post(LINK, data=data, timeout=5)
         return self.get_message(resp.content).format(username=user)
@@ -42,7 +60,7 @@ class Sophos():
             "mode": "193",
             "username": user,
             "a": self.__getmilliepoch(),
-            "producttype": "0"
+            "producttype": "0",
         }
         resp = requests.post(LINK, data=data, timeout=5)
         return self.get_message(resp.content)
@@ -60,9 +78,22 @@ class Sophos128(Sophos):
 
 if __name__ == "__main__":
     branches = [
-        (Sophos(),    os.getenv("SOPHOS_USERNAME", "").split(","),    os.getenv("SOPHOS_PASSWORD", "").split(",")),
-        (Sophos128(), os.getenv("SOPHOS128_USERNAME", "").split(","), os.getenv("SOPHOS128_PASSWORD", "").split(",")),
+        (
+            Sophos(),
+            os.getenv("SOPHOS_USERNAME", "").split(","),
+            os.getenv("SOPHOS_PASSWORD", "").split(","),
+        ),
+        (
+            Sophos128(),
+            os.getenv("SOPHOS128_USERNAME", "").split(","),
+            os.getenv("SOPHOS128_PASSWORD", "").split(","),
+        ),
     ]
+
+    logout_only = len(sys.argv) > 1 and "logout".startswith(sys.argv[1].lower())
+
+    if not logout_only:
+        Sophos.dismiss_portal([gw for gw, _, _ in branches])
 
     gateway = None
     credentials = None
@@ -81,7 +112,7 @@ if __name__ == "__main__":
     for user in SOPHOS_USERNAME:
         gateway.logout(user)
 
-    if len(sys.argv) > 1 and "logout".startswith(sys.argv[1].lower()):
+    if logout_only:
         print("✓ Logout successful")
         sys.exit(0)
 

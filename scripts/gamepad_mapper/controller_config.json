@@ -284,6 +284,66 @@
                 "move_before_keyboard_input": true,
                 "position": "right_middle"
             }
+        },
+        "Smash Karts": {
+            "keybinds": {
+                "A": "space",
+                "B": "space",
+                "X": "space",
+                "Y": "space",
+                "LB": "s",
+                "RB": "w",
+                "LT": {
+                    "key": "s",
+                    "mode": "button",
+                    "direction": "positive",
+                    "threshold": 0.5
+                },
+                "RT": {
+                    "key": "w",
+                    "mode": "button",
+                    "direction": "positive",
+                    "threshold": 0.5
+                },
+                "Select": "esc",
+                "Start": "esc",
+                "DPad_Up": "w",
+                "DPad_Down": "s",
+                "DPad_Left": "a",
+                "DPad_Right": "d",
+                "LS_X": {
+                    "mode": "directions",
+                    "directions": {
+                        "negative": "a",
+                        "positive": "d"
+                    },
+                    "threshold": 0.5
+                },
+                "LS_Y": {
+                    "mode": "directions",
+                    "directions": {
+                        "positive": "w",
+                        "negative": "s"
+                    },
+                    "threshold": 0.5
+                },
+                "RS_X": {
+                    "mode": "directions",
+                    "directions": {
+                        "negative": "a",
+                        "positive": "d"
+                    },
+                    "threshold": 0.5
+                },
+                "RS_Y": {
+                    "mode": "directions",
+                    "directions": {
+                        "positive": "w",
+                        "negative": "s"
+                    },
+                    "threshold": 0.5
+                }
+            }
         }
     },
     "ignored_bits": {
@@ -293,6 +353,12 @@
         "21": [
             0
         ]
+    },
+    "rumble": {
+        "report_id": 2,
+        "left_motor_byte": 2,
+        "right_motor_byte": 3,
+        "packet_size": 8
     },
     "active_game": "Hollow Knight"
 }

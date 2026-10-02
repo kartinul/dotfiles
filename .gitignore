@@ -4,5 +4,13 @@ gemini_docs
 __pycache__/
 *.pyc
 
+zsh/.zshenv
+
 karabiner/.config/karabiner/automatic_backups
-karabiner/.config/karabiner/assetszsh/.zshenv
+karabiner/.config/karabiner/assets
+
+xvpn/bin
+xvpn/target
+xvpn/xray.json
+xvpn/xvpn.conf
+xvpn/modezsh/.zshenv
