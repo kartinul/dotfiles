@@ -2,7 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.xvpn</string>
-  <key>ProgramArguments</key><array><string>/bin/bash</string><string>/Users/kartinul/dotfiles/xvpn/bin/xvpn-daemon</string></array>
+  <!-- The Rust supervisor: it validates configs before applying them, watches
+       child liveness, and reports observed rather than intended state. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/kartinul/dotfiles/xvpn/bin/xvpn</string>
+    <string>--supervise</string>
+  </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/var/log/xvpn-supervisor.log</string>
+  <key>StandardErrorPath</key><string>/var/log/xvpn-supervisor.log</string>
 </dict></plist>

@@ -53,7 +53,7 @@ yabai -m rule --add app="^Ollama$" manage=off
 yabai -m rule --add app="^Secretive$" manage=off
 yabai -m rule --add app="^Stats$" manage=off
 yabai -m rule --add app="^WhichSpace$" manage=off
-yabai -m rule --add app="^V2Box$" manage=off
+yabai -m rule --add app="^V2BOX$" manage=off
 yabai -m rule --add app="^uBlock Origin Lite$" manage=off
 
 # Overlays, Quick Access & Utilities

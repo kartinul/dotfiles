@@ -14,6 +14,7 @@ fi
 
 # 2. PATH Configurations
 export PATH="$HOME/.local/bin:$PATH"
+export PATH="$(go env GOPATH)/bin:$PATH"
 export PATH="$HOME/Developer/github/kartinul/dotfiles/scripts:$PATH"
 export PATH="/Library/Frameworks/Python.framework/Versions/3.14/bin:$PATH"
 export BUN_INSTALL="$HOME/.bun"
@@ -49,6 +50,8 @@ export SAVECODEX_OUTPUT="992501030333_{}.docx"
 export SSH_AUTH_SOCK=~/Library/Containers/com.maxgoedjen.Secretive.SecretAgent/Data/socket.ssh
 
 # 5. Aliases
+alias ls='eza --group-directories-first --icons=auto'
+alias lt='eza --tree --level=3  --icons=auto'
 alias scamtute='/Users/kartinul/Developer/github/kartinul/dotfiles/scripts/scamtute.py --grayscale --brightness 1.8 --threshold 215'
 alias clang++20="clang++ -std=c++20"
 alias gcc="gcc-16"
@@ -151,6 +154,3 @@ fi
 if [[ -f "$HOMEBREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]]; then
     source "$HOMEBREW_PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
 fi
-
-# Added by cua-driver-rs installer — see https://github.com/trycua/cua
-export PATH="/Users/kartinul/.local/bin:$PATH"
