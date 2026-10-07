@@ -12,8 +12,12 @@ if [[ -z "$HOMEBREW_PREFIX" ]]; then
     fi
 fi
 
+setopt interactive_comments
+
+
 # 2. PATH Configurations
 export PATH="$HOME/.local/bin:$PATH"
+export PATH="$HOME/Library/Android/sdk/platform-tools:$PATH"
 export PATH="$(go env GOPATH)/bin:$PATH"
 export PATH="$HOME/Developer/github/kartinul/dotfiles/scripts:$PATH"
 export PATH="/Library/Frameworks/Python.framework/Versions/3.14/bin:$PATH"

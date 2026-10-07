@@ -44,10 +44,13 @@ rcmd + shift - e : yabai -m window --space next;
 
 # Apps
 rcmd - return : ghostty;
-rcmd - w : open -na Safari;
+rcmd - w : open -a "Safari";
 rcmd - c : open -a "Visual Studio Code";
 rcmd - f : open -a "Finder";
 rcmd - z : open -a "Music";
+
+rcmd + shift - w : open -na "Safari";
+rcmd + shift - c : open -na "Visual Studio Code";
 
 # move window to space #
 rcmd + shift - 1 : yabai -m window --space 1;
