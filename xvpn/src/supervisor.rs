@@ -18,6 +18,7 @@ use crate::Result;
 
 const POLL: Duration = Duration::from_secs(5);
 const STARTUP_GRACE: Duration = Duration::from_secs(3);
+const HUNG_AFTER: Duration = Duration::from_secs(30);
 // Catches a proxy upgraded underneath a running install.
 const REVALIDATE_EVERY: Duration = Duration::from_secs(300);
 
@@ -51,6 +52,7 @@ impl Want {
 struct Proxy {
     child: Child,
     started: Instant,
+    active: Instant,
 }
 
 impl Proxy {
@@ -60,6 +62,10 @@ impl Proxy {
 
     fn past_grace(&self) -> bool {
         self.started.elapsed() > STARTUP_GRACE
+    }
+
+    fn is_hung(&self) -> bool {
+        self.active.elapsed() > HUNG_AFTER
     }
 }
 
@@ -94,10 +100,7 @@ pub fn plan(root: &Path) -> Plan {
         Want::On
     } else if mode == "off" {
         Want::None
-    } else if network::read_networks(root).matches(
-        &network::current_ssid(),
-        &network::gateway_mac().unwrap_or_default(),
-    ) {
+    } else if network::read_networks(root).matches(&network::dns_servers()) {
         Want::Selective
     } else {
         Want::None
@@ -192,6 +195,7 @@ fn spawn(program: &str, config_path: &Path) -> Result<Proxy> {
     Ok(Proxy {
         child,
         started: Instant::now(),
+        active: Instant::now(),
     })
 }
 
@@ -221,13 +225,24 @@ pub fn supervise(root: &Path) -> Result<()> {
         let plan = plan(root);
         let key = plan.key.clone();
 
-        // A crashed proxy is as much a reason to restart as a config change.
-        let dead: Vec<&'static str> = running
+        // A crashed or hung proxy is as much a reason to restart as a config change.
+        let stale: Vec<(&'static str, &'static str)> = running
             .iter_mut()
-            .filter_map(|(name, p)| (p.past_grace() && p.has_exited()).then_some(*name))
+            .filter_map(|(name, p)| {
+                if p.past_grace() && p.has_exited() {
+                    return Some((*name, "exited unexpectedly"));
+                }
+                if p.past_grace() && p.is_hung() {
+                    // try_wait() returns Ok(None) when the process is alive
+                    // but stuck — force-kill and restart it.
+                    let _ = p.child.kill();
+                    return Some((*name, "hung; restarted"));
+                }
+                None
+            })
             .collect();
-        for name in &dead {
-            log(format!("{name} exited unexpectedly; restarting"));
+        for (name, reason) in &stale {
+            log(format!("{name}: {reason}"));
             running.remove(name);
             applied = None;
         }
@@ -287,7 +302,7 @@ fn start_for(root: &Path, want: Want, running: &mut BTreeMap<&'static str, Proxy
 
     match spawn("xray", &root.join(config::XRAY)) {
         Ok(p) => {
-            running.insert("xray", p);
+            running.insert("xray", Proxy { active: Instant::now(), ..p });
         }
         Err(e) => {
             log(e);
@@ -301,7 +316,7 @@ fn start_for(root: &Path, want: Want, running: &mut BTreeMap<&'static str, Proxy
     };
     match spawn("sing-box", &root.join(sidecar)) {
         Ok(p) => {
-            running.insert("sing-box", p);
+            running.insert("sing-box", Proxy { active: Instant::now(), ..p });
         }
         Err(e) => {
             log(e);
@@ -317,5 +332,8 @@ fn stop_all(running: &mut BTreeMap<&'static str, Proxy>) {
         let _ = proxy.child.kill();
         let _ = proxy.child.wait();
     }
+    // Catch any zombie that outlived the supervisor.
+    let _ = Command::new("pkill").arg("-x").arg("xray").output();
+    let _ = Command::new("pkill").arg("-x").arg("sing-box").output();
     let _ = fs::remove_file(state_path());
 }

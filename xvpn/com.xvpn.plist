@@ -4,6 +4,11 @@
   <key>Label</key><string>com.xvpn</string>
   <!-- The Rust supervisor: it validates configs before applying them, watches
        child liveness, and reports observed rather than intended state. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
   <key>ProgramArguments</key>
   <array>
     <string>/Users/kartinul/dotfiles/xvpn/bin/xvpn</string>

@@ -36,26 +36,28 @@ pub fn supports_gateway() -> bool {
     os() == Os::Linux
 }
 
-pub fn current_ssid() -> String {
-    imp::current_ssid()
+/// The default gateway's address, if one is configured.
+pub fn router() -> Option<String> {
+    imp::router()
 }
 
-pub fn gateway_mac() -> Option<String> {
-    imp::gateway_mac()
+/// Resolvers configured for the current network.
+pub fn dns_servers() -> Vec<String> {
+    imp::active_device()
+        .map(|dev| imp::dns_servers(&dev))
+        .unwrap_or_default()
 }
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use super::{looks_like_mac, normalize_mac};
     use crate::config::capture;
 
     /// The Wi-Fi interface name, e.g. `en0`.
     ///
     /// `networksetup -listallhardwareports` prints a header line, then a
     /// `Device: en0` line. Only the value after the colon is the device name:
-    /// returning the whole line yields "Device: en0", which every downstream
-    /// `route`/`ipconfig` call rejects, so the SSID and the gateway MAC both
-    /// come back empty.
+    /// returning the whole line yields "Device: en0", which every
+    /// `ipconfig getoption` call then rejects, leaving no lease to read.
     fn wifi_device() -> Option<String> {
         let out = capture("networksetup", &["-listallhardwareports"])?;
         let mut lines = out.lines();
@@ -74,78 +76,39 @@ mod imp {
         None
     }
 
-    /// SSID, or empty when hidden or unavailable.
+    /// Resolvers DHCP handed this interface, most preferred first.
     ///
-    /// `ipconfig getsummary` is tried first, then `networksetup
-    /// -getairportnetwork`. macOS 15 redacts the SSID from `getsummary`
-    /// (`SSID : <redacted>`) unless the caller holds the Location
-    /// permission, so on a current OS the first lookup always reports a
-    /// visible network as hidden. `-getairportnetwork` is not redacted.
-    ///
-    /// A genuinely hidden network reports "You are not associated with an
-    /// AirPort network.", which is not an SSID.
-    pub fn current_ssid() -> String {
-        let Some(dev) = wifi_device() else {
-            return String::new();
+    /// `ipconfig getoption` reads lease state, so unlike `arp`/`netstat` it is
+    /// not empty when spawned without a tty. Verified: the same call returns
+    /// `172.16.68.31` from both a shell and a plain `exec`.
+    pub fn dns_servers(dev: &str) -> Vec<String> {
+        let Some(out) = capture("ipconfig", &["getoption", dev, "domain_name_server"]) else {
+            return Vec::new();
         };
-        let from_summary = capture("ipconfig", &["getsummary", &dev])
-            .and_then(|out| {
-                out.lines()
-                    .find_map(|l| l.trim().strip_prefix("SSID : "))
-                    .map(|s| s.trim().to_string())
-            })
-            .filter(|s| !s.is_empty() && s != "<redacted>");
-
-        if let Some(ssid) = from_summary {
-            return ssid;
-        }
-
-        capture("networksetup", &["-getairportnetwork", &dev])
-            .map(|out| {
-                out.trim()
-                    .strip_prefix("Current Wi-Fi Network: ")
-                    .unwrap_or("")
-                    .trim()
-                    .to_string()
-            })
-            .filter(|s| !s.is_empty() && !s.contains("not associated"))
-            .unwrap_or_default()
+        out.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && super::prefix4(l).is_some())
+            .map(str::to_string)
+            .collect()
     }
 
-    /// MAC of the default gateway.
-    ///
-    /// Reads the neighbour table out of `netstat -rn -f inet`, not `arp`:
-    /// spawned from a plain `exec` (stdin closed, no tty) `arp` returns empty
-    /// stdout with exit 0, or `-- no entry` with exit 1, even though the entry
-    /// is there — the same calls work from a shell or Python. `netstat` reads
-    /// the same table over a different interface and is unaffected.
-    ///
-    /// The row looks like `172.16.164.1  cc:ed:4d:70:13:5f  UHLWIir  en0`.
-    pub fn gateway_mac() -> Option<String> {
-        let dev = wifi_device()?;
-        let routes = capture("route", &["-n", "get", "-ifscope", &dev, "default"])?;
-        let gw = routes
-            .lines()
-            .find_map(|l| l.trim().strip_prefix("gateway: "))
-            .map(str::trim)?;
+    /// The interface DHCP considers current, preferring the Wi-Fi one.
+    pub fn active_device() -> Option<String> {
+        wifi_device()
+    }
 
-        let table = capture("netstat", &["-rn", "-f", "inet"])?;
-        table
-            .lines()
-            // Skip the `172.16.164.1/32 link#12 ...` route row: it carries no
-            // MAC, so requiring both the bare address and a MAC token skips it.
-            .filter(|l| l.split_whitespace().next() == Some(gw))
-            .find_map(|l| {
-                l.split_whitespace()
-                    .find(|t| looks_like_mac(t))
-                    .and_then(normalize_mac)
-            })
+    /// The default gateway, from the same lease `dns_servers` reads.
+    pub fn router() -> Option<String> {
+        let dev = active_device()?;
+        capture("ipconfig", &["getoption", &dev, "router"])
+            .map(|out| out.trim().to_string())
+            .filter(|s| super::prefix4(s).is_some())
     }
 }
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use super::{normalize_mac, parse_proc_route};
+    use super::parse_proc_route;
     use crate::config::capture;
     use std::fs;
 
@@ -160,34 +123,27 @@ mod imp {
             .collect()
     }
 
-    pub fn current_ssid() -> String {
-        for dev in wifi_devices() {
-            let Some(out) = capture("iw", &["dev", &dev, "link"]) else {
-                continue;
-            };
-            if let Some(ssid) = out.lines().find_map(|l| {
-                l.trim()
-                    .strip_prefix("SSID: ")
-                    .map(|s| s.trim().to_string())
-            }) {
-                if !ssid.is_empty() {
-                    return ssid;
-                }
-            }
-        }
-        String::new()
+    /// Resolvers from `/etc/resolv.conf`, which is where a Linux DHCP lease lands.
+    pub fn active_device() -> Option<String> {
+        wifi_devices().into_iter().next()
     }
 
-    pub fn gateway_mac() -> Option<String> {
-        let gw = parse_proc_route(&fs::read_to_string("/proc/net/route").ok()?)?;
-        let arp = fs::read_to_string("/proc/net/arp").ok()?;
-        arp.lines()
-            .skip(1)
-            .filter_map(|l| {
-                let cols: Vec<&str> = l.split_whitespace().collect();
-                (cols.len() >= 4 && cols[0] == gw).then_some(cols[3])
-            })
-            .find_map(normalize_mac)
+    pub fn dns_servers(_dev: &str) -> Vec<String> {
+        let Ok(text) = fs::read_to_string("/etc/resolv.conf") else {
+            return Vec::new();
+        };
+        text.lines()
+            .filter_map(|l| l.trim().strip_prefix("nameserver "))
+            .map(str::trim)
+            // `127.0.0.53` is systemd-resolved's stub, present on every host and
+            // identical everywhere: it says nothing about the network.
+            .filter(|addr| *addr != "127.0.0.53" && super::prefix4(addr).is_some())
+            .map(str::to_string)
+            .collect()
+    }
+
+    pub fn router() -> Option<String> {
+        parse_proc_route(&fs::read_to_string("/proc/net/route").ok()?)
     }
 }
 
@@ -210,69 +166,79 @@ fn parse_proc_route(text: &str) -> Option<String> {
     })
 }
 
-#[cfg(target_os = "macos")]
-fn looks_like_mac(token: &str) -> bool {
-    token.len() == 17 && token.contains(':')
-}
-
-pub fn normalize_mac(raw: &str) -> Option<String> {
-    let cleaned: String = raw
-        .trim()
-        .to_ascii_lowercase()
-        .chars()
-        .filter(|c| c.is_ascii_hexdigit() || *c == ':' || *c == '-')
-        .map(|c| if c == '-' { ':' } else { c })
-        .collect();
-    let parts: Vec<&str> = cleaned.split(':').collect();
-    (parts.len() == 6 && parts.iter().all(|p| p.len() == 2)).then(|| parts.join(":"))
-}
-
 // registered networks
 
 pub const CONF_DEFAULT: &str = "# xvpn.conf — generated by `xvpn use`\n\
 # Networks listed here use selective (default) mode.\n\
-SELECTIVE_SSIDS=()\n\
-SELECTIVE_GWMACS=()\n";
+SELECTIVE_DNS=()\n";
 
-// Independent sets, not pairs: a hidden network has no SSID, so matching also
-// tests the gateway MAC.
+/// Resolver addresses on networks registered for selective mode.
+///
+/// The DHCP-assigned DNS server identifies a network. macOS redacts the SSID from
+/// every CLI path (`ipconfig getsummary` prints `SSID : <redacted>`, CoreWLAN
+/// needs a Location grant a bare executable cannot obtain because it has no
+/// bundle), and the neighbour table that would give a gateway MAC is empty when
+/// read from a non-interactive process. The resolver is DHCP state, so it is
+/// readable from anywhere, needs no permission, and is stable per branch — the
+/// same fact `scripts/wifi.py` keys off.
 #[derive(Default, Debug, PartialEq, Eq)]
 pub struct Networks {
-    pub ssids: BTreeSet<String>,
-    pub macs: BTreeSet<String>,
+    pub dns: BTreeSet<String>,
 }
 
 impl Networks {
-    pub fn matches(&self, ssid: &str, mac: &str) -> bool {
-        (!ssid.is_empty() && self.ssids.contains(ssid))
-            || (!mac.is_empty() && self.macs.contains(mac))
+    /// True when a live resolver is registered.
+    ///
+    /// Matched on the /24 as well as the exact address: a branch may hand out
+    /// more than one resolver, or drift between them, and treating the subnet
+    /// as the unit keeps that from silently disabling selective routing.
+    pub fn matches(&self, resolvers: &[String]) -> bool {
+        resolvers.iter().any(|live| {
+            self.dns.contains(live) || self.dns.iter().any(|known| same_subnet24(known, live))
+        })
     }
+}
+
+/// True when two IPv4 addresses share a /24.
+fn same_subnet24(a: &str, b: &str) -> bool {
+    match (prefix4(a), prefix4(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// The /24 an IPv4 address sits in, or `None` if it is not a dotted quad.
+///
+/// Validates all four octets: a shorter or longer string is not an address, and
+/// an out-of-range octet means the caller is not looking at DHCP state.
+fn prefix4(addr: &str) -> Option<[u8; 3]> {
+    let parts: Vec<&str> = addr.trim().split('.').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let octets: Vec<u8> = parts
+        .iter()
+        .map(|p| p.parse::<u8>().ok())
+        .collect::<Option<Vec<u8>>>()?;
+    Some([octets[0], octets[1], octets[2]])
 }
 
 pub fn read_networks(root: &Path) -> Networks {
     let Ok(content) = fs::read_to_string(root.join(crate::config::CONF)) else {
         return Networks::default();
     };
-    let (mut ssids, mut macs) = (BTreeSet::new(), BTreeSet::new());
+    let mut dns = BTreeSet::new();
     for line in content.lines() {
-        let (is_mac, raw) = if let Some(v) = line.strip_prefix("SELECTIVE_SSIDS=") {
-            (false, v)
-        } else if let Some(v) = line.strip_prefix("SELECTIVE_GWMACS=") {
-            (true, v)
-        } else {
+        let Some(raw) = line.strip_prefix("SELECTIVE_DNS=") else {
             continue;
         };
         for value in parse_array(raw) {
-            if is_mac {
-                if let Some(mac) = normalize_mac(&value) {
-                    macs.insert(mac);
-                }
-            } else if !value.is_empty() {
-                ssids.insert(value);
+            if prefix4(&value).is_some() {
+                dns.insert(value);
             }
         }
     }
-    Networks { ssids, macs }
+    Networks { dns }
 }
 
 pub fn write_networks(root: &Path, networks: &Networks) -> Result<()> {
@@ -284,9 +250,8 @@ pub fn write_networks(root: &Path, networks: &Networks) -> Result<()> {
             .join(" ")
     };
     let content = format!(
-        "# xvpn.conf — generated by `xvpn use`\nSELECTIVE_SSIDS=({})\nSELECTIVE_GWMACS=({})\n",
-        quote(&networks.ssids),
-        quote(&networks.macs),
+        "# xvpn.conf — generated by `xvpn use`\nSELECTIVE_DNS=({})\n",
+        quote(&networks.dns),
     );
     fs::write(root.join(crate::config::CONF), content).map_err(|e| format!("xvpn.conf: {e}"))
 }
@@ -303,55 +268,63 @@ fn parse_array(value: &str) -> Vec<String> {
         .collect()
 }
 
-pub fn use_current(root: &Path) -> Result<String> {
-    let ssid = current_ssid();
-    let mac = gateway_mac();
-    let mut nets = read_networks(root);
-
-    // MAC alone is enough: `Networks::matches` tests either field, and the
-    // gateway MAC is readable even when macOS redacts the SSID. Only bail when
-    // there is nothing at all to match on.
-    if ssid.is_empty() && mac.is_none() {
+/// Register the current network for selective mode.
+///
+/// Takes no argument: the resolvers DHCP handed out identify the network, so
+/// there is nothing to choose and nothing to get wrong.
+pub fn register(root: &Path) -> Result<String> {
+    let resolvers = dns_servers();
+    if resolvers.is_empty() {
         return Err(
-            "could not identify this network: no SSID and no gateway MAC\n\
-             hint: is the Wi-Fi connected? ethernet has no SSID to register"
+            "no DNS server configured on this network, so there is nothing to \
+             identify it by\n\
+             hint: is the Wi-Fi connected? ethernet without DHCP gives no clue"
                 .to_string(),
         );
     }
-    if !ssid.is_empty() {
-        nets.ssids.insert(ssid.clone());
-    }
-    if let Some(mac) = &mac {
-        nets.macs.insert(mac.clone());
+    let mut nets = read_networks(root);
+    let already = resolvers.iter().all(|r| nets.dns.contains(r));
+    for resolver in &resolvers {
+        nets.dns.insert(resolver.clone());
     }
     write_networks(root, &nets)?;
 
-    let shown = if ssid.is_empty() {
-        "(unavailable — matched by MAC)"
+    Ok(if already {
+        "Already registered this network".to_string()
     } else {
-        &ssid
-    };
-    Ok(format!(
-        "Added: SSID='{shown}' gateway MAC='{}'",
-        mac.unwrap_or_else(|| "(none)".into())
-    ))
+        format!("Registered: {}", resolvers.join(", "))
+    })
 }
 
-pub fn forget_current(root: &Path) -> Result<String> {
-    let ssid = current_ssid();
-    let mac = gateway_mac();
+/// Drop `dns` from selective mode, or the current network when none is given.
+pub fn unregister(root: &Path, dns: Option<&str>) -> Result<String> {
     let mut nets = read_networks(root);
 
-    let had = (!ssid.is_empty() && nets.ssids.remove(&ssid))
-        || mac.as_ref().is_some_and(|m| nets.macs.remove(m));
+    let targets: Vec<String> = match dns {
+        Some(d) => vec![d.trim().to_string()],
+        None => dns_servers(),
+    };
+    if targets.is_empty() {
+        return Err("no DNS server configured on this network".to_string());
+    }
+
+    let removed: Vec<String> = targets
+        .iter()
+        .filter(|t| nets.dns.remove(*t))
+        .cloned()
+        .collect();
     write_networks(root, &nets)?;
 
-    let shown = if ssid.is_empty() { "(hidden)" } else { &ssid };
-    Ok(if had {
-        format!("Removed: SSID='{shown}'")
+    Ok(if removed.is_empty() {
+        format!("Not registered: {}", targets.join(", "))
     } else {
-        format!("Not registered: SSID='{shown}'")
+        format!("Removed: {}", removed.join(", "))
     })
+}
+
+/// Resolvers registered for selective mode, sorted.
+pub fn registered(root: &Path) -> Vec<String> {
+    read_networks(root).dns.into_iter().collect()
 }
 
 // app rules

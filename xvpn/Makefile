@@ -4,6 +4,7 @@
 
 CARGO ?= cargo
 BIN   := $(CURDIR)/bin/xvpn
+PREFIX ?= /usr/local
 
 OS    := $(shell uname -s)
 
@@ -38,6 +39,12 @@ build: ## Compile the release binary into ./bin
 	cp -f target/release/xvpn $(BIN)
 	chmod +x $(BIN)
 	@echo "built $(BIN)"
+
+install: build ## Install the binary to $(PREFIX)/bin (copies, no symlink)
+	sudo mkdir -p $(PREFIX)/bin
+	sudo cp -f $(BIN) $(PREFIX)/bin/xvpn
+	sudo chmod +x $(PREFIX)/bin/xvpn
+	@echo "installed $(PREFIX)/bin/xvpn"
 
 dev: ## Compile the debug binary
 	$(CARGO) build

@@ -16,6 +16,8 @@ pub const SELECTIVE: &str = "selective.json";
 pub const CONF: &str = "xvpn.conf";
 pub const PROFILES: &str = "profiles";
 pub const ACTIVE: &str = "active";
+/// Profile names, one per line, in the order `profile list` numbers them.
+pub const ORDER: &str = "order";
 
 pub fn state_file() -> PathBuf {
     if let Ok(p) = std::env::var("XVPN_STATE") {
@@ -30,10 +32,15 @@ pub fn root() -> PathBuf {
     }
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/usr/local/bin/xvpn"));
     let real = fs::canonicalize(&exe).unwrap_or(exe);
-    real.parent()
-        .and_then(|p| p.parent())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("/usr/local/etc/xvpn"))
+    if let Some(candidate) = real.parent().and_then(|p| p.parent()) {
+        // Only accept the candidate if it actually looks like an xvpn dir
+        // (has the mode file or the profiles directory).
+        if candidate.join(MODE).is_file() || candidate.join(PROFILES).is_dir() {
+            return candidate.to_path_buf();
+        }
+    }
+    // Installed layout: binary at /usr/local/bin/xvpn, configs at /usr/local/etc/xvpn.
+    PathBuf::from("/usr/local/etc/xvpn")
 }
 
 pub fn profiles_dir(root: &Path) -> PathBuf {
@@ -42,6 +49,10 @@ pub fn profiles_dir(root: &Path) -> PathBuf {
 
 pub fn active_file(root: &Path) -> PathBuf {
     root.join(ACTIVE)
+}
+
+pub fn order_file(root: &Path) -> PathBuf {
+    root.join(ORDER)
 }
 
 // json
@@ -163,11 +174,6 @@ fn pick_error(output: &str) -> Option<String> {
         })
         .cloned()
         .or_else(|| lines.last().cloned())
-}
-
-pub fn public_ipv4() -> Option<String> {
-    let ip = capture("curl", &["-4", "-s", "--max-time", "5", "ifconfig.me"])?;
-    (!ip.is_empty()).then_some(ip)
 }
 
 // vless

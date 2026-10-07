@@ -13,25 +13,12 @@ pub struct Profile {
     pub name: String,
     pub path: PathBuf,
     pub server: Option<String>,
-    /// Creation time, the basis of the order `xvpn profile use 1` refers to.
-    pub created: u64,
-}
-
-/// Seconds since the epoch, 0 when the mtime is unavailable.
-fn mtime(path: &Path) -> u64 {
-    fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 impl Profile {
     fn load(name: &str, path: PathBuf) -> Result<Self> {
         let cfg = read_json(&path)?;
         Ok(Profile {
-            created: mtime(&path),
             name: name.to_string(),
             path,
             server: config::server_of(&cfg).map(str::to_string),
@@ -68,38 +55,115 @@ pub fn exists(root: &Path, name: &str) -> bool {
     path_for(root, name).is_file()
 }
 
+/// Profiles in display order.
+///
+/// The order lives in the `order` file, one name per line, so it does not move
+/// when a profile is rewritten. Names absent from the file are appended in
+/// alphabetical order, which keeps a hand-dropped profile visible; names in the
+/// file with no profile behind them are dropped, so a stale line cannot block
+/// the positions after it.
 pub fn list(root: &Path) -> Vec<Profile> {
+    let on_disk = disk_names(root);
+    if on_disk.is_empty() {
+        return Vec::new();
+    }
+
+    let recorded = read_order(root);
+    let seeding = recorded.is_empty();
+    // read_order already drops duplicates and blanks, so the only filtering
+    // left is dropping names whose profile is gone.
+    let mut ordered: Vec<String> = recorded
+        .iter()
+        .filter(|n| on_disk.contains(n))
+        .cloned()
+        .collect();
+
+    let mut missing: Vec<String> = on_disk
+        .into_iter()
+        .filter(|n| !ordered.contains(n))
+        .collect();
+    missing.sort();
+    ordered.extend(missing);
+
+    // Seed the file on first use so the order is explicit from then on.
+    if seeding {
+        let _ = write_order(root, &ordered);
+    }
+
+    ordered
+        .into_iter()
+        .map(|name| {
+            let path = path_for(root, &name);
+            Profile::load(&name, path.clone()).unwrap_or(Profile {
+                name,
+                path,
+                server: None,
+            })
+        })
+        .collect()
+}
+
+/// Profile names present in `profiles/`.
+fn disk_names(root: &Path) -> Vec<String> {
     let Ok(entries) = fs::read_dir(config::profiles_dir(root)) else {
         return Vec::new();
     };
-    let mut out: Vec<Profile> = entries
+    entries
         .flatten()
         .filter_map(|e| {
             let path = e.path();
             if path.extension()?.to_str()? != "json" {
                 return None;
             }
-            let name = path.file_stem()?.to_str()?.to_string();
-            Some(Profile::load(&name, path.clone()).unwrap_or(Profile {
-                created: mtime(&path),
-                name,
-                path,
-                server: None,
-            }))
+            path.file_stem()?.to_str().map(str::to_string)
         })
-        .collect();
-    // Creation order, so `xvpn profile use 1` means the same profile until
-    // something is added or removed. Name is the tiebreak: readdir order is
-    // arbitrary and two profiles can share an mtime to the second.
-    out.sort_by(|a, b| a.created.cmp(&b.created).then_with(|| a.name.cmp(&b.name)));
-    out
+        .collect()
+}
+
+/// The recorded order, empty when there is no file.
+pub fn read_order(root: &Path) -> Vec<String> {
+    let Ok(content) = fs::read_to_string(config::order_file(root)) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = Vec::new();
+    for line in content.lines() {
+        let name = line.trim();
+        if !name.is_empty() && !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+    }
+    names
+}
+
+fn write_order(root: &Path, names: &[String]) -> Result<()> {
+    let content = if names.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", names.join("\n"))
+    };
+    fs::write(config::order_file(root), content).map_err(|e| format!("order: {e}"))
+}
+
+/// Record `name`, keeping an existing position so `--force` does not move it.
+fn record(root: &Path, name: &str) -> Result<()> {
+    let mut names = read_order(root);
+    if !names.iter().any(|n| n == name) {
+        names.push(name.to_string());
+    }
+    write_order(root, &names)
+}
+
+/// Forget `name`, so removing a profile does not leave a stale line.
+fn forget(root: &Path, name: &str) -> Result<()> {
+    let names: Vec<String> = read_order(root).into_iter().filter(|n| n != name).collect();
+    write_order(root, &names)
 }
 
 /// Resolve a profile reference to its name.
 ///
-/// A reference is a name or a `1`-based position, where positions are the
-/// order `list` prints: 1 is the first created. An exact name match wins over
-/// a position, so a profile actually named `1` stays reachable.
+/// A reference is a name or a `1`-based position, where positions come from the
+/// `order` file. An exact name match wins over a position, so a profile
+/// actually named `1` stays reachable.
 ///
 /// Positions shift when profiles are added or removed, which is why a name is
 /// the better thing to script with.
@@ -212,6 +276,7 @@ pub fn remove(root: &Path, name: &str) -> Result<()> {
         return Err(format!("no such profile: {name}"));
     }
     fs::remove_file(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    forget(root, name)?;
     if active_name(root).as_deref() == Some(name) {
         match list(root).first() {
             Some(next) => activate(root, &next.name)?,
@@ -239,6 +304,7 @@ pub fn migrate_legacy(root: &Path) -> Result<Option<String>> {
     if let Err(e) = validate(root, "default") {
         eprintln!("warning: existing config did not validate: {e}");
     }
+    record(root, "default")?;
     activate(root, "default")?;
     Ok(Some("default".to_string()))
 }
@@ -263,6 +329,9 @@ pub fn import(root: &Path, name: Option<&str>, link: &str, force: bool) -> Resul
         ));
     }
     store_checked(root, &name, &cfg)?;
+    // After storing: `activate` resolves through `list`, so recording first is
+    // what puts a brand-new profile in the order at all.
+    record(root, &name)?;
     activate(root, &name)?;
     Ok(name)
 }
@@ -284,7 +353,7 @@ pub fn print_list(root: &Path) -> Result<()> {
     let profiles = list(root);
     let active = active_name(root);
     if profiles.is_empty() {
-        println!("no profiles yet — add one with `xvpn import 'vless://...'`");
+        println!("no profiles yet. add one with `xvpn import 'vless://...'`");
         return Ok(());
     }
     let width = profiles

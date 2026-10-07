@@ -3,15 +3,43 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::cli::{
-    apps_args, sites_args, AppsAction, Mode, ProfileCmd, RouterCmd, RunArgs, SitesAction,
-};
+use crate::cli::{apps_args, sites_args, AppsAction, Mode, ProfileCmd, SitesAction};
 use crate::config::{self, Ingress, Scope};
 use crate::network;
 use crate::profiles;
 use crate::{Error, Result};
+
+pub fn use_profile(root: &Path, index: u16) -> Result<()> {
+    profiles::migrate_legacy(root)?;
+    if index == 0 {
+        return set_mode(root, Mode::Off);
+    }
+    let mode = read_mode(root);
+    let profiles = profiles::list(root);
+    let name = profiles
+        .get(index as usize - 1)
+        .map(|p| p.name.clone())
+        .ok_or_else(|| {
+            format!(
+                "no profile {index} (have {}; see `xvpn profile list`)",
+                profiles.len()
+            )
+        })?;
+    profiles::activate(root, &name)?;
+    println!("active profile: {name}");
+    // Don't change the mode — whatever was active (on/default) stays.
+    if mode == "default" {
+        println!("mode stays default");
+    } else {
+        println!("mode stays {mode}");
+    }
+    refresh_sidecars(root)?;
+    println!("supervisor will reload");
+    Ok(())
+}
 
 pub fn run(result: Result<()>) {
     if let Err(e) = result {
@@ -89,7 +117,7 @@ fn print_routing(root: &Path) {
         }
     }
     if apps.is_empty() && sites.is_empty() {
-        println!("nothing else routed — everything else goes direct");
+        println!("nothing else routed, so everything goes direct");
     } else {
         println!("everything else direct");
     }
@@ -99,10 +127,8 @@ pub fn set_mode(root: &Path, mode: Mode) -> Result<()> {
     let mode = mode.as_str();
     fs::write(root.join(config::MODE), mode).map_err(|e| format!("writing mode: {e}"))?;
     println!("mode: {mode}");
+    // Give the supervisor time to notice the change and act on it.
     std::thread::sleep(Duration::from_secs(6));
-    if let Some(ip) = config::public_ipv4() {
-        println!("public IPv4: {ip}");
-    }
     Ok(())
 }
 
@@ -112,7 +138,7 @@ pub fn import(root: &Path, link: Option<&str>, force: bool) -> Result<()> {
     let name = profiles::import(root, None, &link, force)?;
     println!("saved profile '{name}'");
     refresh_sidecars(root)?;
-    println!("\nactive — the supervisor will reload");
+    println!("\nactive. the supervisor will reload");
     Ok(())
 }
 
@@ -124,7 +150,7 @@ pub fn profile(root: &Path, cmd: ProfileCmd) -> Result<()> {
             let saved = profiles::import(root, Some(&name), &link, force)?;
             println!("saved profile '{saved}'");
             refresh_sidecars(root)?;
-            println!("\nactive — the supervisor will reload");
+            println!("\nactive. the supervisor will reload");
             Ok(())
         }
         ProfileCmd::List => profiles::print_list(root),
@@ -269,37 +295,60 @@ fn announce_edit(result: Result<()>, add: bool, name: &str) -> Result<()> {
     }
 }
 
-pub fn router(root: &Path, cmd: RouterCmd) -> Result<()> {
-    require_gateway()?;
-    let _ = (root, cmd);
-    Err("gateway mode is not implemented yet".into())
-}
-
-pub fn run_app(root: &Path, args: RunArgs) -> Result<()> {
-    require_gateway()?;
-    let _ = (root, args);
-    Err("gateway mode is not implemented yet".into())
-}
-
-fn require_gateway() -> Result<()> {
-    if network::supports_gateway() {
-        Ok(())
-    } else {
-        Err(format!(
-            "gateway mode needs Linux (this is {}); use `xvpn set on` for local traffic",
-            network::os_name()
-        ))
-    }
-}
-
-pub fn use_network(root: &Path, add: bool) -> Result<()> {
+/// Register or forget the current network for selective mode.
+///
+/// Takes no argument: the DHCP resolver identifies the network, so there is
+/// nothing to pick and nothing to mistype. `dns` is accepted by `forget` to drop
+/// a resolver for a network you are no longer on.
+pub fn use_network(root: &Path, add: bool, dns: Option<&str>) -> Result<()> {
     let msg = if add {
-        network::use_current(root)?
+        network::register(root)?
     } else {
-        network::forget_current(root)?
+        network::unregister(root, dns)?
     };
     println!("{msg}");
     Ok(())
+}
+
+/// Curl ifconfig.me through the running xray proxy to verify connectivity.
+pub fn check_vpn(root: &Path) -> Result<()> {
+    let (name, _) = profiles::resolve_active(root)?;
+    println!("checking profile: {name}");
+
+    // Try SOCKS proxy first (port 10808), then HTTP proxy (port 10809).
+    for port in [config::SOCKS_PORT, config::HTTP_PORT] {
+        let proxy = format!("socks5://127.0.0.1:{port}");
+        match run_curl(&proxy) {
+            Ok(ip) => {
+                println!("via {proxy}: {ip}");
+                return Ok(());
+            }
+            Err(e) => println!("{proxy}: {e}"),
+        }
+    }
+    Err("no running proxy found — start the VPN first".into())
+}
+
+fn run_curl(proxy: &str) -> Result<String> {
+    let out = Command::new("curl")
+        .args(["-s", "-x", proxy, "ifconfig.me"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("curl failed: {e}"))?;
+    if out.status.success() {
+        let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if ip.is_empty() {
+            return Err("empty response".into());
+        }
+        Ok(ip)
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        Err(if err.is_empty() {
+            format!("curl exited with {}", out.status)
+        } else {
+            err
+        })
+    }
 }
 
 fn ingress() -> Ingress {
@@ -388,7 +437,7 @@ pub fn check(root: &Path) -> Result<()> {
 pub fn repair(root: &Path) -> Result<()> {
     profiles::migrate_legacy(root)?;
     refresh_sidecars(root)?;
-    println!("\nconfigs repaired — the supervisor will reload");
+    println!("\nconfigs repaired. the supervisor will reload");
     Ok(())
 }
 
@@ -397,7 +446,7 @@ pub fn repair(root: &Path) -> Result<()> {
 pub fn reset(root: &Path) -> Result<()> {
     profiles::migrate_legacy(root)?;
 
-    for name in [config::XRAY, config::CONF, config::ACTIVE] {
+    for name in [config::XRAY, config::CONF, config::ACTIVE, config::ORDER] {
         match fs::remove_file(root.join(name)) {
             Ok(()) => println!("deleted {name}"),
             Err(e) if e.kind() == io::ErrorKind::NotFound => println!("{name}: already absent"),
@@ -441,6 +490,45 @@ pub fn reset(root: &Path) -> Result<()> {
             failures.join("\n  ")
         ));
     }
-    println!("\ndefaults restored — mode=default, all profiles removed");
+    println!("\ndefaults restored: mode=default, all profiles removed");
     Ok(())
+}
+
+/// Run an executable directly, bypassing the proxy when index is 0.
+///
+/// `xvpn 0 app args...` runs the app with no proxy at all (guaranteed).
+/// `xvpn N app args...` activates profile N and runs the app through it.
+pub fn run_app(root: &Path, index: u16, trailing: &[String]) -> Result<()> {
+    if trailing.is_empty() {
+        return Err("usage: xvpn <n> <app> [args...]\n  n=0 runs without proxy, n>0 activates that profile".into());
+    }
+    let app = &trailing[0];
+    let app_args = &trailing[1..];
+
+    if index == 0 {
+        println!("running {app} without proxy");
+    } else {
+        use_profile(root, index)?;
+        println!("running {app} via profile {index}");
+    }
+
+    let mut cmd = Command::new(app);
+    cmd.args(app_args);
+    cmd.stdin(Stdio::inherit());
+    cmd.stdout(Stdio::inherit());
+    cmd.stderr(Stdio::inherit());
+    // Strip proxy env vars so the child never sees them.
+    cmd.env_remove("ALL_PROXY");
+    cmd.env_remove("all_proxy");
+    cmd.env_remove("HTTP_PROXY");
+    cmd.env_remove("http_proxy");
+    cmd.env_remove("HTTPS_PROXY");
+    cmd.env_remove("https_proxy");
+    cmd.env_remove("SOCKS_SERVER");
+    cmd.env_remove("socks_server");
+    let status = cmd.spawn()
+        .map_err(|e| format!("could not run {app}: {e}"))?
+        .wait()
+        .map_err(|e| format!("{app} failed: {e}"))?;
+    std::process::exit(status.code().unwrap_or(1));
 }

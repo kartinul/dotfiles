@@ -9,6 +9,8 @@ zsh/.zshenv
 karabiner/.config/karabiner/automatic_backups
 karabiner/.config/karabiner/assets
 
+.DS_Store
+
 # xvpn: build output and runtime state. Nothing here is source.
 # xray.json and profiles/ embed the subscription UUID, which is a credential.
 xvpn/target/
@@ -20,5 +22,6 @@ xvpn/on.json
 xvpn/selective.json
 xvpn/xvpn.conf
 xvpn/mode
+xvpn/order
 xvpn/*.json.tmp
 xvpn/todo.md

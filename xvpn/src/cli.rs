@@ -3,13 +3,21 @@
 //! This is the only file with real documentation, because `xvpn --help` and
 //! this file are the same thing: everything here is what a user reads.
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::{commands, config};
 
 #[derive(Parser)]
 #[command(name = "xvpn", version, about = "xray VPN manager")]
 pub struct Cli {
+    /// Index into the profile list (0 = off, 1 = first profile, etc.)
+    #[arg(value_parser, default_value_t = 0)]
+    pub index: u16,
+
+    /// Command to run with its arguments (everything after the index)
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub cmd: Vec<String>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 
@@ -29,14 +37,14 @@ pub enum Command {
     Apps {
         #[arg(value_enum, default_value_t = AppsAction::Show)]
         action: AppsAction,
-        /// App bundle name — required for set/remove
+        /// App bundle name, required for set and remove
         app: Option<String>,
     },
     /// Manage the sites routed in default mode
     Sites {
         #[arg(value_enum, default_value_t = SitesAction::Show)]
         action: SitesAction,
-        /// Domain — required for set/remove. Covers the domain and subdomains.
+        /// Domain, required for set and remove. Covers subdomains too.
         site: Option<String>,
     },
     /// Import a vless:// link into the active profile
@@ -52,18 +60,15 @@ pub enum Command {
     Profile(ProfileCmd),
 
     // Reachable, but out of the base listing.
-    /// Register this Wi-Fi network for default mode
+    /// Use selective routing on the network you are on now
     #[command(hide = true)]
     Use,
-    /// Remove this Wi-Fi network from default mode
+    /// Stop using selective routing on the current network
     #[command(hide = true)]
-    Forget,
-    /// Proxy other machines through the VPN — Linux only
-    #[command(subcommand, hide = true)]
-    Router(RouterCmd),
-    /// Run a command inside the gateway netns so only it is proxied — Linux
-    #[command(hide = true)]
-    Run(RunArgs),
+    Forget {
+        /// Resolver to forget; defaults to the current network's
+        dns: Option<String>,
+    },
     /// Alias for `set on`
     #[command(hide = true)]
     On,
@@ -83,7 +88,7 @@ pub enum Command {
     #[command(hide = true)]
     Remove { app: String },
 
-    /// Validate every config file
+    /// Curl ifconfig.me through the running xray proxy
     Check,
     /// Rewrite sing-box configs onto the current schema
     Repair,
@@ -137,18 +142,6 @@ pub enum SitesAction {
 }
 
 #[derive(Subcommand, Debug)]
-pub enum RouterCmd {
-    /// Start proxying forwarded clients
-    On,
-    /// Stop proxying forwarded clients
-    Off,
-    /// Show gateway state
-    Status,
-    /// Print what `on` would do, without doing it
-    DryRun,
-}
-
-#[derive(Subcommand, Debug)]
 pub enum ProfileCmd {
     /// Store a vless:// link under a name
     Add {
@@ -176,16 +169,6 @@ pub enum ProfileCmd {
         /// Name or position; defaults to the active profile
         name: Option<String>,
     },
-}
-
-#[derive(Args, Debug)]
-pub struct RunArgs {
-    /// Command and arguments to run inside the netns
-    #[arg(trailing_var_arg = true, required = true)]
-    pub cmd: Vec<String>,
-    /// Run as this user instead of the invoking user
-    #[arg(long)]
-    pub user: Option<String>,
 }
 
 /// Checked before anything is written: `show` takes no name, `set`/`remove`
@@ -248,7 +231,14 @@ pub fn dispatch(cli: Cli) {
     }
 
     let result = match cli.command {
-        None | Some(Command::Status) => commands::status(&root),
+        None => {
+            if cli.index > 0 || !cli.cmd.is_empty() {
+                commands::run_app(&root, cli.index, &cli.cmd)
+            } else {
+                commands::status(&root)
+            }
+        }
+        Some(Command::Status) => commands::status(&root),
         Some(Command::Set { mode }) => commands::set_mode(&root, mode),
         Some(Command::On) => commands::set_mode(&root, Mode::On),
         Some(Command::Default) => commands::set_mode(&root, Mode::Default),
@@ -259,11 +249,10 @@ pub fn dispatch(cli: Cli) {
         Some(Command::Remove { app }) => commands::remove_app(&root, &app),
         Some(Command::Import { link, force }) => commands::import(&root, link.as_deref(), force),
         Some(Command::Profile(cmd)) => commands::profile(&root, cmd),
-        Some(Command::Use) => commands::use_network(&root, true),
-        Some(Command::Forget) => commands::use_network(&root, false),
-        Some(Command::Router(cmd)) => commands::router(&root, cmd),
-        Some(Command::Run(args)) => commands::run_app(&root, args),
-        Some(Command::Check) => commands::check(&root),
+        Some(Command::Use) => commands::use_network(&root, true, None),
+        Some(Command::Forget { dns }) => commands::use_network(&root, false, dns.as_deref()),
+
+        Some(Command::Check) => commands::check_vpn(&root),
         Some(Command::Repair) => commands::repair(&root),
         Some(Command::Reset) => commands::reset(&root),
     };
