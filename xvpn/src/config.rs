@@ -27,41 +27,51 @@ pub fn state_file() -> PathBuf {
 }
 
 pub fn root() -> PathBuf {
+    // 1️⃣ Allow the user to force a specific root via env var.
     if let Ok(dir) = std::env::var("XVPN_DIR") {
         return PathBuf::from(dir);
     }
+
+    // 2️⃣ Try to infer the root from the binary location (project layout).
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/usr/local/bin/xvpn"));
     let real = fs::canonicalize(&exe).unwrap_or(exe);
     if let Some(candidate) = real.parent().and_then(|p| p.parent()) {
-        // Only accept the candidate if it actually looks like an xvpn dir
-        // (has the mode file or the profiles directory).
+        // Accept the candidate if it looks like an xvpn directory (has a mode file or a profiles dir).
         if candidate.join(MODE).is_file() || candidate.join(PROFILES).is_dir() {
             return candidate.to_path_buf();
         }
     }
-    // Installed layout: binary at /usr/local/bin/xvpn, configs at /usr/local/etc/xvpn.
+
+    // 3️⃣ Default installation layout – /usr/local/etc/xvpn.
     let default_path = PathBuf::from("/usr/local/etc/xvpn");
-    // If the default location is not writable by the current user, fall back to a user‑writable directory
-    // (e.g. $HOME/.xvpn). This avoids the need for sudo.
-    if let Ok(metadata) = std::fs::metadata(&default_path) {
-        let permissions = metadata.permissions();
-        // If the directory exists but is not writable, or we cannot create it, use $HOME/.xvpn.
-        if permissions.readonly() {
-            if let Ok(home) = std::env::var("HOME") {
-                let user_path = PathBuf::from(home).join(".xvpn");
-                // Ensure the directory exists (ignore errors – they will surface later if really broken).
-                let _ = std::fs::create_dir_all(&user_path);
-                return user_path;
-            }
-        }
-    } else {
-        // If the path does not exist at all, also prefer a user‑writable location.
-        if let Ok(home) = std::env::var("HOME") {
-            let user_path = PathBuf::from(home).join(".xvpn");
-            let _ = std::fs::create_dir_all(&user_path);
-            return user_path;
-        }
+
+    // 4️⃣ If we cannot write to the default location, fall back to a user‑writable directory.
+    // Attempt to create a temporary file to probe write permission.
+    let write_test = default_path.join(".xvpn_write_test");
+    let can_write = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&write_test)
+        .map(|f| {
+            // Clean up the test file right away.
+            let _ = std::fs::remove_file(&write_test);
+            drop(f);
+            true
+        })
+        .unwrap_or(false);
+
+    if can_write {
+        return default_path;
     }
+
+    // 5️⃣ Fallback to $HOME/.xvpn (guaranteed to be writable by the user).
+    if let Ok(home) = std::env::var("HOME") {
+        let user_path = PathBuf::from(home).join(".xvpn");
+        let _ = std::fs::create_dir_all(&user_path);
+        return user_path;
+    }
+
+    // 6️⃣ As a last resort, just return the default (will likely fail, but we have no better choice).
     default_path
 }
 
