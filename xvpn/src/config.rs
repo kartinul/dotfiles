@@ -11,8 +11,8 @@ use crate::Result;
 
 pub const MODE: &str = "mode";
 pub const XRAY: &str = "xray.json";
-pub const ON: &str = "on.json";
-pub const SELECTIVE: &str = "selective.json";
+pub const ON: &str = "modes/on.json";
+pub const DEFAULT: &str = "modes/default.json";
 pub const CONF: &str = "xvpn.conf";
 pub const PROFILES: &str = "profiles";
 pub const ACTIVE: &str = "active";
@@ -40,7 +40,29 @@ pub fn root() -> PathBuf {
         }
     }
     // Installed layout: binary at /usr/local/bin/xvpn, configs at /usr/local/etc/xvpn.
-    PathBuf::from("/usr/local/etc/xvpn")
+    let default_path = PathBuf::from("/usr/local/etc/xvpn");
+    // If the default location is not writable by the current user, fall back to a user‑writable directory
+    // (e.g. $HOME/.xvpn). This avoids the need for sudo.
+    if let Ok(metadata) = std::fs::metadata(&default_path) {
+        let permissions = metadata.permissions();
+        // If the directory exists but is not writable, or we cannot create it, use $HOME/.xvpn.
+        if permissions.readonly() {
+            if let Ok(home) = std::env::var("HOME") {
+                let user_path = PathBuf::from(home).join(".xvpn");
+                // Ensure the directory exists (ignore errors – they will surface later if really broken).
+                let _ = std::fs::create_dir_all(&user_path);
+                return user_path;
+            }
+        }
+    } else {
+        // If the path does not exist at all, also prefer a user‑writable location.
+        if let Ok(home) = std::env::var("HOME") {
+            let user_path = PathBuf::from(home).join(".xvpn");
+            let _ = std::fs::create_dir_all(&user_path);
+            return user_path;
+        }
+    }
+    default_path
 }
 
 pub fn profiles_dir(root: &Path) -> PathBuf {
