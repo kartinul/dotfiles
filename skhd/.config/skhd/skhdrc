@@ -45,6 +45,7 @@ rcmd + shift - e : yabai -m window --space next;
 # Apps
 rcmd - return : ghostty;
 rcmd - w : open -a "Safari";
+rcmd - a : open -a "Whatsapp";
 rcmd - c : open -a "Visual Studio Code";
 rcmd - f : open -a "Finder";
 rcmd - z : open -a "Music";

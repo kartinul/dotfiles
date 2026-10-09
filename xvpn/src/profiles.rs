@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::config::{self, read_json, write_secret};
+use crate::output as out;
 use crate::Result;
 
 #[derive(Clone, Debug)]
@@ -311,7 +312,7 @@ pub fn migrate_legacy(root: &Path) -> Result<Option<String>> {
 
 pub fn import(root: &Path, name: Option<&str>, link: &str, force: bool) -> Result<String> {
     let parsed = config::parse_link(link)?;
-    let cfg = config::xray_config(&parsed);
+    let cfg = config::xray_config(&parsed, config::SOCKS_PORT, config::HTTP_PORT);
 
     let name = match name {
         Some(n) => n.to_string(),
@@ -353,29 +354,35 @@ pub fn print_list(root: &Path) -> Result<()> {
     let profiles = list(root);
     let active = active_name(root);
     if profiles.is_empty() {
-        println!("no profiles yet. add one with `xvpn import 'vless://...'`");
+        out::status("→", "no profiles yet. add one with `xvpn import 'vless://...'`");
         return Ok(());
     }
-    let width = profiles
-        .iter()
-        .map(|p| p.name.len())
-        .max()
-        .unwrap_or(4)
-        .max(4);
-    // Numbered in creation order so a position can be used instead of a name.
-    for (i, p) in profiles.into_iter().enumerate() {
+
+    // Prepare data for the table
+    let header = vec!["", "ID", "name", "server"];
+
+    // We need to store the owned strings so they live long enough for the table call
+    let mut storage: Vec<Vec<String>> = Vec::new();
+    storage.push(header.iter().map(|s| s.to_string()).collect());
+
+    for (i, p) in profiles.iter().enumerate() {
         let marker = if active.as_deref() == Some(p.name.as_str()) {
-            '*'
+            "*"
         } else {
-            ' '
+            ""
         };
-        println!(
-            "{marker} {:>2}. {:width$}  {}",
-            i + 1,
-            p.name,
-            p.server.as_deref().unwrap_or("(unreadable)"),
-            width = width
-        );
+        let index = (i + 1).to_string();
+        let name = p.name.clone();
+        let server = p.server.clone().unwrap_or_else(|| "(unreadable)".to_string());
+
+        storage.push(vec![marker.to_string(), index, name, server]);
     }
+
+    let rows: Vec<Vec<&str>> = storage
+        .iter()
+        .map(|row| row.iter().map(|s| s.as_str()).collect())
+        .collect();
+
+    out::table(&rows, true);
     Ok(())
 }

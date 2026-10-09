@@ -274,6 +274,7 @@ name = "xvpn"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "libc",
  "serde",
  "serde_json",
  "signal-hook",

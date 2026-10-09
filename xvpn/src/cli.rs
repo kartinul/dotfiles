@@ -59,12 +59,10 @@ pub enum Command {
     #[command(subcommand)]
     Profile(ProfileCmd),
 
-    // Reachable, but out of the base listing.
+    // Selective routing on current network
     /// Use selective routing on the network you are on now
-    #[command(hide = true)]
     Use,
-    /// Stop using selective routing on the current network
-    #[command(hide = true)]
+    /// Alias for `sites remove`
     Forget {
         /// Resolver to forget; defaults to the current network's
         dns: Option<String>,
@@ -87,13 +85,37 @@ pub enum Command {
     /// Alias for `apps remove`
     #[command(hide = true)]
     Remove { app: String },
+    /// Run the supervisor in the foreground
+    #[command(hide = true)]
+    Supervise,
 
     /// Curl ifconfig.me through the running xray proxy
     Check,
+    /// Tail the supervisor and proxy logs
+    Logs,
     /// Rewrite sing-box configs onto the current schema
     Repair,
+    /// Move state out of a directory an older build used
+    Migrate,
     /// Delete generated configs and restore stock defaults
     Reset,
+
+    /// Manage the supervisor agent
+    #[command(hide = true)]
+    Agent {
+        #[command(subcommand)]
+        cmd: Option<AgentCmd>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AgentCmd {
+    /// Install and start the user agent
+    Install,
+    /// Stop the supervisor and proxies
+    Stop,
+    /// Restart the supervisor
+    Restart,
 }
 
 #[derive(ValueEnum, Clone, Copy, PartialEq, Eq, Debug)]
@@ -232,17 +254,19 @@ pub fn dispatch(cli: Cli) {
 
     let result = match cli.command {
         None => {
-            if cli.index > 0 || !cli.cmd.is_empty() {
+            if !cli.cmd.is_empty() {
                 commands::run_app(&root, cli.index, &cli.cmd)
+            } else if cli.index > 0 {
+                commands::use_profile(&root, cli.index)
             } else {
                 commands::status(&root)
             }
         }
-        Some(Command::Status) => commands::status(&root),
         Some(Command::Set { mode }) => commands::set_mode(&root, mode),
         Some(Command::On) => commands::set_mode(&root, Mode::On),
         Some(Command::Default) => commands::set_mode(&root, Mode::Default),
         Some(Command::Off) => commands::set_mode(&root, Mode::Off),
+        Some(Command::Status) => commands::status(&root),
         Some(Command::Apps { action, app }) => commands::apps(&root, action, app),
         Some(Command::Sites { action, site }) => commands::sites(&root, action, site),
         Some(Command::Add { app }) => commands::add_app(&root, &app),
@@ -253,8 +277,18 @@ pub fn dispatch(cli: Cli) {
         Some(Command::Forget { dns }) => commands::use_network(&root, false, dns.as_deref()),
 
         Some(Command::Check) => commands::check_vpn(&root),
+        Some(Command::Logs) => commands::logs(),
         Some(Command::Repair) => commands::repair(&root),
+        Some(Command::Migrate) => commands::migrate(),
         Some(Command::Reset) => commands::reset(&root),
+        Some(Command::Supervise) => {
+            commands::run(crate::supervisor::supervise(&root));
+            return;
+        }
+        Some(Command::Agent { cmd }) => {
+            let cmd = cmd.unwrap_or(AgentCmd::Install);
+            commands::agent(cmd, &root)
+        }
     };
 
     commands::run(result);

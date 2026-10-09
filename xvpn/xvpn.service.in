@@ -1,0 +1,18 @@
+# A user unit, not a system one: it runs in your session, so it needs no root.
+# Installed to ~/.config/systemd/user by `make agent`.
+#
+# `on` mode still needs sing-box's tun interface, which needs root on Linux too;
+# the supervisor reaches it through cached sudo rather than running as root.
+[Unit]
+Description=xvpn supervisor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__XVPN_BIN__ --supervise
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -13,6 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+# flock(2) for the supervisor's single-instance lock. Already in the tree via
+# signal-hook; listed explicitly because we call it directly.
+libc = "0.2"
 # Graceful shutdown: without this, SIGTERM from launchd/systemd kills the
 # supervisor instantly and orphans the running proxies.
 signal-hook = "0.3"

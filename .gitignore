@@ -18,8 +18,7 @@ xvpn/bin/
 xvpn/xray.json
 xvpn/profiles/
 xvpn/active
-xvpn/on.json
-xvpn/selective.json
+xvpn/modes/
 xvpn/xvpn.conf
 xvpn/mode
 xvpn/order

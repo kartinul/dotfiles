@@ -4,12 +4,15 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::net::TcpStream;
 
 use crate::cli::{apps_args, sites_args, AppsAction, Mode, ProfileCmd, SitesAction};
 use crate::config::{self, Ingress, Scope};
 use crate::network;
+use crate::output as out;
 use crate::profiles;
+use crate::supervisor;
 use crate::{Error, Result};
 
 pub fn use_profile(root: &Path, index: u16) -> Result<()> {
@@ -29,15 +32,10 @@ pub fn use_profile(root: &Path, index: u16) -> Result<()> {
             )
         })?;
     profiles::activate(root, &name)?;
-    println!("active profile: {name}");
-    // Don't change the mode — whatever was active (on/default) stays.
-    if mode == "default" {
-        println!("mode stays default");
-    } else {
-        println!("mode stays {mode}");
-    }
+    out::status("✓", &format!("active profile: {name}"));
+    out::kv("mode", &mode);
     refresh_sidecars(root)?;
-    println!("supervisor will reload");
+    out::status("→", "supervisor will reload");
     Ok(())
 }
 
@@ -61,10 +59,15 @@ pub fn status(root: &Path) -> Result<()> {
     let active = fs::read_to_string(config::state_file())
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "stopped".to_string());
-    println!("mode: {mode}  active: {active}");
 
-    // Only when there is one: "profile: none" on an install with nothing picked
-    // is noise, not information.
+    out::kv("mode", &mode);
+    out::kv("active", &active);
+    out::kv("root", &root.display().to_string());
+
+    if let Some(notice) = config::stale_root_notice() {
+        out::warn(&notice);
+    }
+
     match profiles::active_name(root) {
         Some(name) => {
             let server = profiles::list(root)
@@ -72,73 +75,124 @@ pub fn status(root: &Path) -> Result<()> {
                 .find(|p| p.name == name)
                 .and_then(|p| p.server)
                 .unwrap_or_else(|| "(unreadable)".into());
-            println!("profile: {name} ({server})");
+            out::kv("profile", &format!("{name} ({server})"));
         }
-        None => println!("profile: none (run `xvpn import`)"),
+        None => out::kv("profile", "none (run `xvpn import`)"),
     }
 
-    // The routing lists only mean something when selective routing is in effect.
     if mode == "default" {
         print_routing(root);
     }
     Ok(())
 }
 
+/// Move state out of a root an older build resolved to.
+pub fn migrate() -> Result<()> {
+    match config::migrate_state()? {
+        Some(from) => out::status("✓", &format!(
+            "migrated state from {} to {}",
+            from.display(),
+            config::root().display()
+        )),
+        None => out::status("→", "nothing to migrate"),
+    }
+    Ok(())
+}
+
 fn print_routing(root: &Path) {
-    let path = root.join(config::SELECTIVE);
+    let path = root.join(config::DEFAULT);
     let cfg = match config::read_json(&path) {
         Ok(c) => c,
         Err(_) => {
-            println!("routed: unknown (run `xvpn repair`)");
+            out::kv("routed", "unknown (run `xvpn repair`)");
             return;
         }
     };
-    // Read from the live config, not the template: what is listed here is what
-    // sing-box is actually routing.
     let apps = network::app_names(&cfg);
     let sites = network::site_names(&cfg);
 
-    // Labelled as always-routed, not "via xray". It is a floor baked into every
-    // selective config, so listing it beside the lists the user chose would
-    // read as if they had chosen it too.
-    println!("always proxied (built in):");
-    println!("  {}", config::PROXY_TOOLS.join(", "));
+    out::section("always proxied (built in):");
+    out::list(&config::PROXY_TOOLS.iter().map(|s| s.as_ref()).collect::<Vec<_>>());
 
     if !apps.is_empty() {
-        println!("apps:");
-        for app in &apps {
-            println!("  {app}");
-        }
+        out::section("apps:");
+        out::list(&apps.iter().map(|s| s.as_str()).collect::<Vec<_>>());
     }
     if !sites.is_empty() {
-        println!("sites (and subdomains):");
-        for site in &sites {
-            println!("  {site}");
-        }
+        out::section("sites (and subdomains):");
+        out::list(&sites.iter().map(|s| s.as_str()).collect::<Vec<_>>());
     }
     if apps.is_empty() && sites.is_empty() {
-        println!("nothing else routed, so everything goes direct");
+        out::status("→", "nothing else routed, everything goes direct");
     } else {
-        println!("everything else direct");
+        out::status("→", "everything else direct");
     }
 }
 
 pub fn set_mode(root: &Path, mode: Mode) -> Result<()> {
     let mode = mode.as_str();
-    fs::write(root.join(config::MODE), mode).map_err(|e| format!("writing mode: {e}"))?;
-    println!("mode: {mode}");
-    // Give the supervisor time to notice the change and act on it.
-    std::thread::sleep(Duration::from_secs(6));
+    let path = root.join(config::MODE);
+    fs::write(&path, mode).map_err(|e| format!("writing mode: {e}"))?;
+    let written = std::time::SystemTime::now();
+    out::kv("mode", mode);
+
+    if !supervisor::is_running() {
+        out::warn("no supervisor is running, so nothing was applied");
+        out::info("start one with `make agent` (auto-start) or `xvpn supervise`");
+        return Ok(());
+    }
+
+    match wait_for_state(written, Duration::from_secs(10)) {
+        Some(state) => match state.as_str() {
+            "on" | "selective" => out::kv("active", &state),
+            "failed" => {
+                return Err(
+                    "supervisor rejected the config and stayed down — see `xvpn logs`".into(),
+                )
+            }
+            other => out::kv("active", &format!("{other} (nothing is routing)")),
+        },
+        None => {
+            out::warn("no state update received from supervisor");
+        }
+    }
     Ok(())
+}
+
+/// Wait for the supervisor to republish state after `changed_at`.
+///
+/// Compares mtime rather than the value, so re-issuing the mode you are
+/// already in still reports the live state instead of timing out.
+fn wait_for_state(changed_at: std::time::SystemTime, timeout: Duration) -> Option<String> {
+    let path = config::state_file();
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(250));
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
+        let fresh = meta.modified().map(|m| m >= changed_at).unwrap_or(false);
+        if !fresh {
+            continue;
+        }
+        let state = fs::read_to_string(&path).ok()?.trim().to_string();
+        if !state.is_empty() {
+            return Some(state);
+        }
+    }
+    fs::read_to_string(&path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 pub fn import(root: &Path, link: Option<&str>, force: bool) -> Result<()> {
     profiles::migrate_legacy(root)?;
     let link = read_link(link)?;
     let name = profiles::import(root, None, &link, force)?;
-    println!("saved profile '{name}'");
+    out::status("✓", &format!("saved profile '{name}'"));
     refresh_sidecars(root)?;
-    println!("\nactive. the supervisor will reload");
+    out::status("→", "active. the supervisor will reload");
     Ok(())
 }
 
@@ -148,9 +202,9 @@ pub fn profile(root: &Path, cmd: ProfileCmd) -> Result<()> {
         ProfileCmd::Add { name, link, force } => {
             let link = read_link(link.as_deref())?;
             let saved = profiles::import(root, Some(&name), &link, force)?;
-            println!("saved profile '{saved}'");
+            out::status("✓", &format!("saved profile '{saved}'"));
             refresh_sidecars(root)?;
-            println!("\nactive. the supervisor will reload");
+            out::status("→", "active. the supervisor will reload");
             Ok(())
         }
         ProfileCmd::List => profiles::print_list(root),
@@ -158,15 +212,15 @@ pub fn profile(root: &Path, cmd: ProfileCmd) -> Result<()> {
             let name = profiles::resolve(root, &name)?;
             profiles::validate(root, &name)?;
             profiles::activate(root, &name)?;
-            println!("active profile: {name}");
+            out::status("✓", &format!("active profile: {name}"));
             refresh_sidecars(root)?;
-            println!("supervisor will reload");
+            out::status("→", "supervisor will reload");
             Ok(())
         }
         ProfileCmd::Remove { name } => {
             let name = profiles::resolve(root, &name)?;
             profiles::remove(root, &name)?;
-            println!("removed profile '{name}'");
+            out::status("✓", &format!("removed profile '{name}'"));
             Ok(())
         }
         ProfileCmd::Show { name } => {
@@ -210,15 +264,9 @@ pub fn apps(root: &Path, action: AppsAction, app: Option<String>) -> Result<()> 
 }
 
 pub fn list_apps(root: &Path) -> Result<()> {
-    let apps = network::listed_apps(&root.join(config::SELECTIVE))?;
-    if apps.is_empty() {
-        println!("apps: (none)");
-    } else {
-        println!("apps:");
-        for app in apps {
-            println!("  - {app}");
-        }
-    }
+    let apps = network::listed_apps(&root.join(config::DEFAULT))?;
+    out::section("apps:");
+    out::list(&apps.iter().map(|s| s.as_str()).collect::<Vec<_>>());
     Ok(())
 }
 
@@ -231,10 +279,11 @@ pub fn remove_app(root: &Path, app: &str) -> Result<()> {
 }
 
 fn edit_app(root: &Path, add: bool, app: &str) -> Result<()> {
+    let shown = network::normalize_app(app)?;
     announce_edit(
-        network::edit_app(&root.join(config::SELECTIVE), add, app),
+        network::edit_app(&root.join(config::DEFAULT), add, &shown),
         add,
-        app,
+        &shown,
     )
 }
 
@@ -249,15 +298,9 @@ pub fn sites(root: &Path, action: SitesAction, site: Option<String>) -> Result<(
 }
 
 pub fn list_sites(root: &Path) -> Result<()> {
-    let sites = network::listed_sites(&root.join(config::SELECTIVE))?;
-    if sites.is_empty() {
-        println!("sites: (none)");
-    } else {
-        println!("sites (and their subdomains):");
-        for site in sites {
-            println!("  - {site}");
-        }
-    }
+    let sites = network::listed_sites(&root.join(config::DEFAULT))?;
+    out::section("sites (and subdomains):");
+    out::list(&sites.iter().map(|s| s.as_str()).collect::<Vec<_>>());
     Ok(())
 }
 
@@ -274,7 +317,7 @@ fn edit_site(root: &Path, add: bool, site: &str) -> Result<()> {
     // and matches what actually landed in the config.
     let shown = network::normalize_site(site)?;
     announce_edit(
-        network::edit_site(&root.join(config::SELECTIVE), add, &shown),
+        network::edit_site(&root.join(config::DEFAULT), add, &shown),
         add,
         &shown,
     )
@@ -284,11 +327,11 @@ fn edit_site(root: &Path, add: bool, site: &str) -> Result<()> {
 fn announce_edit(result: Result<()>, add: bool, name: &str) -> Result<()> {
     match result {
         Ok(()) => {
-            println!("{} {name}", if add { "Added" } else { "Removed" });
+            out::status(if add { "✓" } else { "✓" }, &format!("{} {}", if add { "Added" } else { "Removed" }, name));
             Ok(())
         }
         Err(e) if network::is_noop(&e) => {
-            println!("{e}");
+            out::status("→", &e);
             Ok(())
         }
         Err(e) => Err(e),
@@ -297,33 +340,37 @@ fn announce_edit(result: Result<()>, add: bool, name: &str) -> Result<()> {
 
 /// Register or forget the current network for selective mode.
 ///
-/// Takes no argument: the DHCP resolver identifies the network, so there is
-/// nothing to pick and nothing to mistype. `dns` is accepted by `forget` to drop
-/// a resolver for a network you are no longer on.
+/// `dns` is accepted by `forget` to drop a resolver for a network you are no
+/// longer on.
 pub fn use_network(root: &Path, add: bool, dns: Option<&str>) -> Result<()> {
     let msg = if add {
         network::register(root)?
     } else {
         network::unregister(root, dns)?
     };
-    println!("{msg}");
+    out::status("✓", &msg);
     Ok(())
 }
+
+/// Each listener paired with the scheme it actually speaks.
+///
+/// Probing the HTTP port with `socks5://` fails the handshake (curl exit 97)
+/// even when the proxy is perfectly healthy, which reads like a dead tunnel.
+const PROBES: [(&str, u16); 2] = [("socks5", config::SOCKS_PORT), ("http", config::HTTP_PORT)];
 
 /// Curl ifconfig.me through the running xray proxy to verify connectivity.
 pub fn check_vpn(root: &Path) -> Result<()> {
     let (name, _) = profiles::resolve_active(root)?;
-    println!("checking profile: {name}");
+    out::kv("checking profile", &name);
 
-    // Try SOCKS proxy first (port 10808), then HTTP proxy (port 10809).
-    for port in [config::SOCKS_PORT, config::HTTP_PORT] {
-        let proxy = format!("socks5://127.0.0.1:{port}");
+    for (scheme, port) in PROBES {
+        let proxy = format!("{scheme}://127.0.0.1:{port}");
         match run_curl(&proxy) {
             Ok(ip) => {
-                println!("via {proxy}: {ip}");
+                out::kv("via proxy", &format!("{proxy} → {ip}"));
                 return Ok(());
             }
-            Err(e) => println!("{proxy}: {e}"),
+            Err(e) => out::kv(&proxy, &e),
         }
     }
     Err("no running proxy found — start the VPN first".into())
@@ -362,7 +409,7 @@ fn ingress() -> Ingress {
 fn sidecars() -> [(&'static str, Scope); 2] {
     [
         (config::ON, Scope::Global),
-        (config::SELECTIVE, Scope::Selective),
+        (config::DEFAULT, Scope::Selective),
     ]
 }
 
@@ -376,12 +423,15 @@ fn refresh_sidecars(root: &Path) -> Result<()> {
 
 fn ensure_sidecar(root: &Path, name: &str, scope: Scope, ingress: Ingress) -> Result<()> {
     let path = root.join(name);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("{name}: {e}"))?;
+    }
     let action = match config::read_json(&path) {
         Ok(existing) => {
             let fresh = config::migrate_singbox(&existing, scope, ingress);
             if fresh == existing {
                 config::check_singbox(&path).map_err(|e| format!("{name}: {e}"))?;
-                println!("{name}: already current");
+                out::status("→", &format!("{name}: already current"));
                 return Ok(());
             }
             config::write_json(&path, &fresh)?;
@@ -393,41 +443,64 @@ fn ensure_sidecar(root: &Path, name: &str, scope: Scope, ingress: Ingress) -> Re
         }
     };
     config::check_singbox(&path).map_err(|e| format!("{name}: {e}"))?;
-    println!("{name}: {action}, sing-box check OK");
+    out::status("✓", &format!("{name}: {action}, sing-box check OK"));
+    Ok(())
+}
+
+/// Verify that the external binaries the CLI depends on are on PATH.
+pub fn ensure_dependencies() -> Result<()> {
+    for tool in ["xray", "sing-box"] {
+        let found = Command::new("which")
+            .arg(tool)
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+        if !found {
+            return Err(format!(
+                "{tool} not found in PATH — run `./install.sh` to install it"
+            ));
+        }
+    }
     Ok(())
 }
 
 pub fn check(root: &Path) -> Result<()> {
+    if let Err(e) = ensure_dependencies() {
+        out::warn(&e);
+        out::info("run ./install.sh to install missing dependencies");
+        return Ok(());
+    }
     let mut ok = true;
 
     match profiles::resolve_active(root) {
         Ok((name, path)) => match config::check_xray(&path) {
-            Ok(()) => println!("profile '{name}': OK"),
+            Ok(()) => out::status("✓", &format!("profile '{name}': OK")),
             Err(e) => {
-                println!("profile '{name}': FAILED\n{e}");
+                out::status("✗", &format!("profile '{name}': FAILED"));
+                out::error(&e);
                 ok = false;
             }
         },
-        Err(e) => println!("{e}"),
+        Err(e) => out::error(&e),
     }
 
     for (name, _) in sidecars() {
         let path = root.join(name);
         if !path.exists() {
-            println!("{name}: MISSING (run `xvpn repair`)");
+            out::status("✗", &format!("{name}: MISSING (run `xvpn repair`)"));
             ok = false;
             continue;
         }
         match config::check_singbox(&path) {
-            Ok(()) => println!("{name}: OK"),
+            Ok(()) => out::status("✓", &format!("{name}: OK")),
             Err(e) => {
-                println!("{name}: FAILED\n{e}");
+                out::status("✗", &format!("{name}: FAILED"));
+                out::error(&e);
                 ok = false;
             }
         }
     }
 
-    // Empty error: failures are already printed, so no bare "Error:" prefix.
     if !ok {
         return Err(String::new());
     }
@@ -435,33 +508,43 @@ pub fn check(root: &Path) -> Result<()> {
 }
 
 pub fn repair(root: &Path) -> Result<()> {
+    if let Err(e) = ensure_dependencies() {
+        out::warn(&e);
+        out::info("run ./install.sh to install missing dependencies");
+        return Ok(());
+    }
     profiles::migrate_legacy(root)?;
     refresh_sidecars(root)?;
-    println!("\nconfigs repaired. the supervisor will reload");
+    out::status("✓", "configs repaired. the supervisor will reload");
     Ok(())
 }
 
-// Leaves the running tunnel alone (killing root-owned processes needs sudo);
-// `make reset` stops the supervisor first, then calls this.
 pub fn reset(root: &Path) -> Result<()> {
+    if let Err(e) = ensure_dependencies() {
+        out::warn(&e);
+        out::info("run ./install.sh to install missing dependencies");
+        return Ok(());
+    }
     profiles::migrate_legacy(root)?;
 
+    out::section("removing configs:");
     for name in [config::XRAY, config::CONF, config::ACTIVE, config::ORDER] {
         match fs::remove_file(root.join(name)) {
-            Ok(()) => println!("deleted {name}"),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => println!("{name}: already absent"),
-            Err(e) => println!("could not delete {name}: {e}"),
+            Ok(()) => out::status("✓", &format!("deleted {name}")),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => out::status("→", &format!("{name}: already absent")),
+            Err(e) => out::status("✗", &format!("could not delete {name}: {e}")),
         }
     }
     if config::profiles_dir(root).is_dir() {
         match fs::remove_dir_all(config::profiles_dir(root)) {
-            Ok(()) => println!("deleted {}", config::PROFILES),
-            Err(e) => println!("could not delete {}: {e}", config::PROFILES),
+            Ok(()) => out::status("✓", &format!("deleted {}", config::PROFILES)),
+            Err(e) => out::status("✗", &format!("could not delete {}: {e}", config::PROFILES)),
         }
     }
 
     let ingress = ingress();
     let mut failures: Vec<Error> = Vec::new();
+    out::section("recreating configs:");
     for (name, scope) in sidecars() {
         let path = root.join(name);
         if let Err(e) = config::write_json(&path, &config::singbox_config(scope, ingress)) {
@@ -469,7 +552,7 @@ pub fn reset(root: &Path) -> Result<()> {
             continue;
         }
         match config::check_singbox(&path) {
-            Ok(()) => println!("reset {name} (sing-box check OK)"),
+            Ok(()) => out::status("✓", &format!("reset {name} (sing-box check OK)")),
             Err(e) => failures.push(format!("{name}: {e}")),
         }
     }
@@ -479,56 +562,212 @@ pub fn reset(root: &Path) -> Result<()> {
         (config::MODE, "default\n"),
     ] {
         match fs::write(root.join(name), content) {
-            Ok(()) => println!("reset {name}"),
+            Ok(()) => out::status("✓", &format!("reset {name}")),
             Err(e) => failures.push(format!("{name}: {e}")),
         }
     }
 
     if !failures.is_empty() {
-        return Err(format!(
-            "reset finished with errors:\n  {}",
-            failures.join("\n  ")
-        ));
+        out::error("reset finished with errors:");
+        for f in &failures {
+            out::error(f);
+        }
+        return Err(String::new());
     }
-    println!("\ndefaults restored: mode=default, all profiles removed");
+    out::status("✓", "defaults restored: mode=default, all profiles removed");
     Ok(())
 }
 
 /// Run an executable directly, bypassing the proxy when index is 0.
 ///
 /// `xvpn 0 app args...` runs the app with no proxy at all (guaranteed).
-/// `xvpn N app args...` activates profile N and runs the app through it.
+/// `xvpn N app args...` runs the app through profile N temporarily,
+/// using an isolated xray instance and environment variables.
 pub fn run_app(root: &Path, index: u16, trailing: &[String]) -> Result<()> {
     if trailing.is_empty() {
-        return Err("usage: xvpn <n> <app> [args...]\n  n=0 runs without proxy, n>0 activates that profile".into());
+        return Err(
+            "usage: xvpn <n> <app> [args...]\n  n=0 runs without proxy, n>0 runs through that profile temporarily"
+                .into(),
+        );
     }
     let app = &trailing[0];
     let app_args = &trailing[1..];
 
-    if index == 0 {
-        println!("running {app} without proxy");
+    let (name, cfg, socks_port, http_port) = if index == 0 {
+        (
+            "direct".to_string(),
+            config::direct_xray_config(10812, 10813),
+            10812,
+            10813,
+        )
     } else {
-        use_profile(root, index)?;
-        println!("running {app} via profile {index}");
+        let profiles = profiles::list(root);
+        let profile = profiles.get(index as usize - 1).ok_or_else(|| {
+            format!(
+                "no profile {index} (have {}; see `xvpn profile list`)",
+                profiles.len()
+            )
+        })?;
+        let mut cfg = config::read_json(&profile.path)?;
+        let socks_port = 10810;
+        let http_port = 10811;
+
+        if let Some(inbounds) = cfg.get_mut("inbounds").and_then(|i| i.as_array_mut()) {
+            for inbound in inbounds {
+                if inbound["protocol"] == "socks" {
+                    inbound["port"] = serde_json::json!(socks_port);
+                } else if inbound["protocol"] == "http" {
+                    inbound["port"] = serde_json::json!(http_port);
+                }
+            }
+        }
+        (profile.name.clone(), cfg, socks_port, http_port)
+    };
+
+    let tmp_dir = std::env::temp_dir().join("xvpn");
+    let _ = fs::create_dir_all(&tmp_dir);
+    let tmp_id = format!("{}-{}", std::process::id(), index);
+    let tmp_path = tmp_dir.join(format!("xray-isolated-{}.json", tmp_id));
+    config::write_json(&tmp_path, &cfg)?;
+
+    if index > 0 {
+        out::status("✓", &format!("active profile: {name}"));
     }
+    out::status(
+        "→",
+        &format!("starting isolated proxy on ports {socks_port}/{http_port}"),
+    );
+
+    let log_path = tmp_dir.join(format!("xray-isolated-{}.log", tmp_id));
+    let log_file = fs::File::create(&log_path).map_err(|e| format!("creating log: {e}"))?;
+
+    let mut xray = Command::new("xray")
+        .args(["run", "-c"])
+        .arg(&tmp_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log_file)
+        .spawn()
+        .map_err(|e| format!("could not start xray: {e}"))?;
+
+    // Wait for xray to be ready
+    let mut ready = false;
+    for _ in 0..50 {
+        if TcpStream::connect(format!("127.0.0.1:{socks_port}")).is_ok() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        if let Ok(Some(status)) = xray.try_wait() {
+            let log_content = fs::read_to_string(&log_path).unwrap_or_default();
+            let _ = fs::remove_file(&tmp_path);
+            let _ = fs::remove_file(&log_path);
+            return Err(format!("xray exited with {status}\n{log_content}"));
+        }
+    }
+
+    if !ready {
+        let _ = xray.kill();
+        let _ = fs::remove_file(&tmp_path);
+        let _ = fs::remove_file(&log_path);
+        return Err("timed out waiting for isolated xray to start".into());
+    }
+
+    out::status(
+        "→",
+        &format!(
+            "running {app} via {}",
+            if index == 0 {
+                "direct bypass".to_string()
+            } else {
+                format!("profile {index}")
+            }
+        ),
+    );
 
     let mut cmd = Command::new(app);
     cmd.args(app_args);
     cmd.stdin(Stdio::inherit());
     cmd.stdout(Stdio::inherit());
     cmd.stderr(Stdio::inherit());
-    // Strip proxy env vars so the child never sees them.
-    cmd.env_remove("ALL_PROXY");
-    cmd.env_remove("all_proxy");
-    cmd.env_remove("HTTP_PROXY");
-    cmd.env_remove("http_proxy");
-    cmd.env_remove("HTTPS_PROXY");
-    cmd.env_remove("https_proxy");
-    cmd.env_remove("SOCKS_SERVER");
-    cmd.env_remove("socks_server");
-    let status = cmd.spawn()
+    cmd.env("ALL_PROXY", format!("socks5://127.0.0.1:{socks_port}"));
+    cmd.env("all_proxy", format!("socks5://127.0.0.1:{socks_port}"));
+    cmd.env("HTTP_PROXY", format!("http://127.0.0.1:{http_port}"));
+    cmd.env("http_proxy", format!("http://127.0.0.1:{http_port}"));
+    cmd.env("HTTPS_PROXY", format!("http://127.0.0.1:{http_port}"));
+    cmd.env("https_proxy", format!("http://127.0.0.1:{http_port}"));
+
+    let status = cmd
+        .spawn()
         .map_err(|e| format!("could not run {app}: {e}"))?
         .wait()
         .map_err(|e| format!("{app} failed: {e}"))?;
+
+    let _ = xray.kill();
+    let _ = xray.wait();
+    let _ = fs::remove_file(&tmp_path);
+    let _ = fs::remove_file(&log_path);
+
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+pub fn agent(cmd: crate::cli::AgentCmd, _root: &Path) -> Result<()> {
+    match cmd {
+        crate::cli::AgentCmd::Install => {
+            out::status("→", "installing and loading user agent");
+            run_make("agent")
+        }
+        crate::cli::AgentCmd::Stop => {
+            out::status("→", "stopping supervisor and proxies");
+            run_make("stop")
+        }
+        crate::cli::AgentCmd::Restart => {
+            out::status("→", "restarting supervisor");
+            run_make("restart")
+        }
+    }
+}
+
+fn run_make(target: &str) -> Result<()> {
+    let status = Command::new("make")
+        .arg(target)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|e| format!("make {target} failed: {e}"))?;
+
+    if !status.success() {
+        return Err(format!("make {target} exited with {status}").into());
+    }
+    Ok(())
+}
+
+/// Spawns `tail -f` to watch supervisor, xray and sing-box logs.
+pub fn logs() -> Result<()> {
+    let logs = [
+        config::log_file("xray"),
+        config::log_file("sing-box"),
+        config::log_file("supervisor"),
+    ];
+    let mut args = vec!["-f".to_string()];
+    for log in &logs {
+        // Create files if they don't exist so tail doesn't complain
+        if let Some(parent) = log.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::OpenOptions::new().create(true).append(true).open(log);
+        args.push(log.to_string_lossy().to_string());
+    }
+    let mut cmd = Command::new("tail");
+    cmd.args(&args);
+    cmd.stdin(Stdio::inherit());
+    cmd.stdout(Stdio::inherit());
+    cmd.stderr(Stdio::inherit());
+    let status = cmd
+        .spawn()
+        .map_err(|e| format!("could not tail logs: {e}"))?
+        .wait()
+        .map_err(|e| format!("tail logs failed: {e}"))?;
     std::process::exit(status.code().unwrap_or(1));
 }

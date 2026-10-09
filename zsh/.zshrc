@@ -84,6 +84,11 @@ alias ybstart="yabai --start-service && skhd --start-service"
 alias ybstop="yabai --stop-service && skhd --stop-service"
 alias ybreload="ybstop && ybstart"
 
+fuckoff() {
+  xattr -d com.apple.quarantine "$1" 2>/dev/null
+  open "$1"
+}
+
 # 6. ZSH Plugins & Keybindings
 # Custom widgets
 vi-yank-pbcopy() {

@@ -11,14 +11,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::config::{self, Ingress, Scope};
+use crate::config::{self, Ingress};
 use crate::network;
 use crate::profiles;
 use crate::Result;
 
 const POLL: Duration = Duration::from_secs(5);
 const STARTUP_GRACE: Duration = Duration::from_secs(3);
-const HUNG_AFTER: Duration = Duration::from_secs(30);
 // Catches a proxy upgraded underneath a running install.
 const REVALIDATE_EVERY: Duration = Duration::from_secs(300);
 
@@ -43,7 +42,7 @@ impl Want {
     fn sidecar(self) -> Option<&'static str> {
         match self {
             Want::On => Some(config::ON),
-            Want::Selective => Some(config::SELECTIVE),
+            Want::Selective => Some(config::DEFAULT),
             _ => None,
         }
     }
@@ -52,7 +51,9 @@ impl Want {
 struct Proxy {
     child: Child,
     started: Instant,
-    active: Instant,
+    /// Spawned through `sudo`, so it runs as root and our own SIGKILL is
+    /// refused. Teardown has to go back through sudo to stop it.
+    elevated: bool,
 }
 
 impl Proxy {
@@ -63,10 +64,6 @@ impl Proxy {
     fn past_grace(&self) -> bool {
         self.started.elapsed() > STARTUP_GRACE
     }
-
-    fn is_hung(&self) -> bool {
-        self.active.elapsed() > HUNG_AFTER
-    }
 }
 
 pub struct Plan {
@@ -74,24 +71,31 @@ pub struct Plan {
     pub key: String,
 }
 
-pub fn plan(root: &Path) -> Plan {
-    let mode = fs::read_to_string(root.join(config::MODE))
+pub fn plan(root: &Path, sudo_cache: &mut Option<(Instant, bool)>) -> Plan {
+    let mode_path = root.join(config::MODE);
+    let mode = fs::read_to_string(&mode_path)
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "default".to_string());
-    let mut key = mode.clone();
+    let mut key = format!("{mode}:{}", mtime(&mode_path));
 
     let active = match profiles::resolve_active(root) {
         Ok((name, path)) => {
-            if let Err(e) = config::check_xray(&path) {
+            key.push_str(&format!(":{name}:{}", mtime(&path)));
+            Some(name)
+        }
+        Err(e) => {
+            // `off` genuinely needs no profile. Every other mode does, so the
+            // reason gets reported instead of collapsing into a cheerful
+            // `none` that looks like a working tunnel.
+            if mode == "off" {
+                None
+            } else {
                 return Plan {
                     want: Want::Failed,
                     key: format!("failed:{e}"),
                 };
             }
-            key.push_str(&format!(":{name}:{}", mtime(&path)));
-            Some(name)
         }
-        Err(_) => None,
     };
 
     let want = if active.is_none() {
@@ -108,27 +112,29 @@ pub fn plan(root: &Path) -> Plan {
 
     if let Some(sidecar) = want.sidecar() {
         let path = root.join(sidecar);
-        let ingress = ingress();
-        let scope = if want == Want::Selective {
-            Scope::Selective
-        } else {
-            Scope::Global
-        };
-        let _ = scope;
         if !path.is_file() {
             return Plan {
                 want: Want::Failed,
                 key: format!("failed:{sidecar} missing"),
             };
         }
-        if let Err(e) = config::check_singbox(&path) {
-            return Plan {
-                want: Want::Failed,
-                key: format!("failed:{sidecar}: {e}"),
-            };
-        }
         key.push_str(&format!(":{sidecar}:{}", mtime(&path)));
-        let _ = ingress;
+
+        // tun installs routes, which needs root. Probed here rather than left to
+        // start-up so the state file explains the block instead of the sidecar
+        // exiting every 3 seconds and being restarted forever.
+        if ingress() == Ingress::Tun && !config::is_root() {
+            let ready = cached_sudo(sudo_cache);
+            key.push_str(&format!(":sudo:{ready}"));
+            if !ready {
+                return Plan {
+                    want: Want::Failed,
+                    key: "failed:this mode needs root for the tun interface — \
+                      run `xvpn supervise` in foreground or configure sing-box in sudoers"
+                        .to_string(),
+                };
+            }
+        }
     }
 
     Plan { want, key }
@@ -158,32 +164,178 @@ fn state_path() -> PathBuf {
 fn publish(state: &str) {
     let path = state_path();
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        if let Err(e) = fs::create_dir_all(parent) {
+            log(format!("cannot create {}: {e}", parent.display()));
+            return;
+        }
     }
-    let _ = fs::write(&path, format!("{state}\n"));
+    // Reported rather than dropped: when this failed silently, `xvpn` status
+    // showed a stale value from whatever last had write access.
+    if let Err(e) = fs::write(&path, format!("{state}\n")) {
+        log(format!("cannot write {}: {e}", path.display()));
+    }
 }
 
 fn log(msg: impl std::fmt::Display) {
     eprintln!("[xvpn] {msg}");
 }
 
-fn spawn(program: &str, config_path: &Path) -> Result<Proxy> {
-    let log_path = if program == "xray" {
-        PathBuf::from("/var/log/xvpn-xray.log")
-    } else {
-        PathBuf::from("/var/log/xvpn-singbox.log")
-    };
+/// Exclusive, non-blocking lock held for the supervisor's lifetime.
+///
+/// Two supervisors on one root are destructive: each `stop_all` kills the
+/// other's proxies, and they contend for ports 10808/10809. Refusing to start
+/// is the whole fix.
+struct SingleInstance {
+    _file: fs::File,
+}
+
+fn single_instance() -> Result<SingleInstance> {
+    let path = config::lock_file();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
     let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    // SAFETY: `file` owns a valid descriptor and outlives the call. The kernel
+    // drops the lock when the process exits, so a crash cannot strand it.
+    let rc = unsafe {
+        libc::flock(
+            std::os::unix::io::AsRawFd::as_raw_fd(&file),
+            libc::LOCK_EX | libc::LOCK_NB,
+        )
+    };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::WouldBlock {
+            return Err(format!(
+                "another xvpn supervisor is already running ({} is locked)\n\
+                 stop it first: pkill -f 'xvpn --supervise'",
+                path.display()
+            ));
+        }
+        return Err(format!("locking {}: {err}", path.display()));
+    }
+    Ok(SingleInstance { _file: file })
+}
+
+/// Returns true if another process holds the supervisor lock file.
+pub fn is_running() -> bool {
+    let path = config::lock_file();
+    let Ok(file) = fs::OpenOptions::new().read(true).write(true).open(&path) else {
+        return false;
+    };
+    let rc = unsafe {
+        libc::flock(
+            std::os::unix::io::AsRawFd::as_raw_fd(&file),
+            libc::LOCK_EX | libc::LOCK_NB,
+        )
+    };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::WouldBlock
+            || err.raw_os_error() == Some(libc::EWOULDBLOCK)
+            || err.raw_os_error() == Some(libc::EAGAIN)
+        {
+            return true;
+        }
+    } else {
+        unsafe {
+            libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&file), libc::LOCK_UN);
+        }
+    }
+    false
+}
+
+/// Whether sudo can be used right now without a password prompt.
+///
+/// The supervisor may be a background agent with no terminal to prompt on, so
+/// it must never try: `sudo -n` fails immediately instead of hanging on a
+/// prompt nobody can see or answer.
+fn sudo_ready() -> bool {
+    let check_true = Command::new("sudo")
+        .args(["-n", "true"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if check_true {
+        return true;
+    }
+    Command::new("sudo")
+        .args(["-n", "sing-box", "version"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Cached `sudo_ready()`, valid for the lifetime of a sudo timestamp.
+///
+/// The supervisor polls every 5 seconds, and `sudo -n` is a process spawn
+/// that is only meaningful once per credential grant. Caching it keeps the
+/// idle supervisor quiet instead of spawning a process every cycle.
+fn cached_sudo(cache: &mut Option<(Instant, bool)>) -> bool {
+    let now = Instant::now();
+    if let Some((ts, ready)) = *cache {
+        if now.duration_since(ts) < Duration::from_secs(300) {
+            return ready;
+        }
+    }
+    let ready = sudo_ready();
+    *cache = Some((now, ready));
+    ready
+}
+
+/// sing-box needs root for tun on macOS; xray only listens on localhost.
+///
+/// Both must be true for `on` mode to work at all, and neither is discoverable
+/// until start-up fails with a bare permission error.
+fn sidecar_needs_root() -> bool {
+    ingress() == Ingress::Tun && !config::is_root()
+}
+
+fn spawn(program: &str, config_path: &Path, elevate: bool) -> Result<Proxy> {
+    let log_path = config::log_file(program);
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    // Failure used to be swallowed into `Stdio::null()`, which sent every
+    // proxy error to /dev/null and left the logs looking merely stale.
+    let file = match fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log_path)
-        .ok();
+    {
+        Ok(f) => Some(f),
+        Err(e) => {
+            log(format!(
+                "cannot open {}: {e} — {program} output will be discarded",
+                log_path.display()
+            ));
+            None
+        }
+    };
     let stderr = file
         .as_ref()
         .map(|f| Stdio::from(f.try_clone().unwrap()))
         .unwrap_or_else(Stdio::null);
 
-    let child = Command::new(program)
+    let mut command = if elevate {
+        let mut c = Command::new("sudo");
+        c.args(["-n", program]);
+        c
+    } else {
+        Command::new(program)
+    };
+    let child = command
         .args(["run", "-c"])
         .arg(config_path)
         .stdin(Stdio::null())
@@ -195,7 +347,7 @@ fn spawn(program: &str, config_path: &Path) -> Result<Proxy> {
     Ok(Proxy {
         child,
         started: Instant::now(),
-        active: Instant::now(),
+        elevated: elevate,
     })
 }
 
@@ -213,32 +365,43 @@ fn hook_shutdown_signals(flag: &Arc<AtomicBool>) {
 fn hook_shutdown_signals(_flag: &Arc<AtomicBool>) {}
 
 pub fn supervise(root: &Path) -> Result<()> {
+    // Ensure external binaries are available before we start loops.
+    if let Err(e) = crate::commands::ensure_dependencies() {
+        eprintln!("[xvpn] dependency error: {}", e);
+        eprintln!("[xvpn] aborting supervisor start – run ./install.sh to install missing tools.");
+        return Err(e);
+    }
     let shutdown = Arc::new(AtomicBool::new(false));
     hook_shutdown_signals(&shutdown);
 
+    // Taken before any child is spawned: two supervisors reconciling one root
+    // kill each other's proxies on every config change.
+    let _instance = single_instance()?;
+
     log(format!("supervising {}", root.display()));
+    if let Some(notice) = config::stale_root_notice() {
+        log(notice);
+    }
     let mut running: BTreeMap<&'static str, Proxy> = BTreeMap::new();
     let mut applied: Option<String> = None;
     let mut last_validated = Instant::now() - REVALIDATE_EVERY;
+    // `sudo -n` is a process spawn; caching it across polls keeps the idle
+    // supervisor quiet instead of spawning a process every 5 seconds.
+    let mut sudo_cache: Option<(Instant, bool)> = None;
 
     while !shutdown.load(Ordering::SeqCst) {
-        let plan = plan(root);
+        let plan = plan(root, &mut sudo_cache);
         let key = plan.key.clone();
 
-        // A crashed or hung proxy is as much a reason to restart as a config change.
+        // A crashed proxy is reason to restart.
         let stale: Vec<(&'static str, &'static str)> = running
             .iter_mut()
             .filter_map(|(name, p)| {
                 if p.past_grace() && p.has_exited() {
-                    return Some((*name, "exited unexpectedly"));
+                    Some((*name, "exited unexpectedly"))
+                } else {
+                    None
                 }
-                if p.past_grace() && p.is_hung() {
-                    // try_wait() returns Ok(None) when the process is alive
-                    // but stuck — force-kill and restart it.
-                    let _ = p.child.kill();
-                    return Some((*name, "hung; restarted"));
-                }
-                None
             })
             .collect();
         for (name, reason) in &stale {
@@ -295,14 +458,19 @@ fn interruptible_sleep(total: Duration, shutdown: &AtomicBool) {
 }
 
 fn start_for(root: &Path, want: Want, running: &mut BTreeMap<&'static str, Proxy>) {
+    // Nothing to route: spawning xray here would leave a proxy running that
+    // nothing feeds and no mode asked for.
+    if want == Want::None {
+        return;
+    }
     let Ok((name, _)) = profiles::active_config(root) else {
         return;
     };
     log(format!("profile: {name}"));
 
-    match spawn("xray", &root.join(config::XRAY)) {
+    match spawn("xray", &root.join(config::XRAY), false) {
         Ok(p) => {
-            running.insert("xray", Proxy { active: Instant::now(), ..p });
+            running.insert("xray", p);
         }
         Err(e) => {
             log(e);
@@ -314,9 +482,14 @@ fn start_for(root: &Path, want: Want, running: &mut BTreeMap<&'static str, Proxy
     let Some(sidecar) = want.sidecar() else {
         return;
     };
-    match spawn("sing-box", &root.join(sidecar)) {
+    let elevate = sidecar_needs_root();
+    if elevate {
+        // Already probed in plan(), so this is the cached-credential path.
+        log("tun mode needs root — starting sing-box with cached sudo");
+    }
+    match spawn("sing-box", &root.join(sidecar), elevate) {
         Ok(p) => {
-            running.insert("sing-box", Proxy { active: Instant::now(), ..p });
+            running.insert("sing-box", p);
         }
         Err(e) => {
             log(e);
@@ -329,11 +502,23 @@ fn start_for(root: &Path, want: Want, running: &mut BTreeMap<&'static str, Proxy
 
 fn stop_all(running: &mut BTreeMap<&'static str, Proxy>) {
     for (_, mut proxy) in std::mem::take(running) {
+        if proxy.elevated {
+            // `sudo` is a wrapper: killing its PID orphans the real
+            // `sing-box`, which keeps hijacking DNS and routing as root.
+            // pkill reaches the actual process instead.
+            let _ = Command::new("sudo")
+                .args(["-n", "pkill", "-x", "sing-box"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
         let _ = proxy.child.kill();
         let _ = proxy.child.wait();
     }
-    // Catch any zombie that outlived the supervisor.
-    let _ = Command::new("pkill").arg("-x").arg("xray").output();
-    let _ = Command::new("pkill").arg("-x").arg("sing-box").output();
+    // No global `pkill` here. It was meant to catch orphans, but it also killed
+    // any *other* supervisor's proxies, which is what turned two stale
+    // supervisors into a tunnel that flapped on and off. `make stop` clears
+    // leftovers explicitly instead.
     let _ = fs::remove_file(state_path());
 }

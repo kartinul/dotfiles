@@ -1,21 +1,27 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- A user LaunchAgent, not a system LaunchDaemon: it runs in your session as
+     you, so nothing it writes needs root. `make agent` substitutes the binary
+     and log paths below and installs this into ~/Library/LaunchAgents. -->
 <plist version="1.0"><dict>
   <key>Label</key><string>com.xvpn</string>
-  <!-- The Rust supervisor: it validates configs before applying them, watches
-       child liveness, and reports observed rather than intended state. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__XVPN_BIN__</string>
+    <string>--supervise</string>
+  </array>
+  <!-- xray and sing-box come from Homebrew; the agent's PATH is not your
+       shell's, so without this it aborts on a missing dependency. -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/Users/kartinul/dotfiles/xvpn/bin/xvpn</string>
-    <string>--supervise</string>
-  </array>
   <key>RunAtLoad</key><true/>
+  <!-- Restarts the supervisor if it dies. The supervisor itself holds a
+       single-instance lock, so this cannot produce two of them. -->
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/var/log/xvpn-supervisor.log</string>
-  <key>StandardErrorPath</key><string>/var/log/xvpn-supervisor.log</string>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>__XVPN_LOG__</string>
+  <key>StandardErrorPath</key><string>__XVPN_LOG__</string>
 </dict></plist>

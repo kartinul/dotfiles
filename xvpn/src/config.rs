@@ -19,64 +19,207 @@ pub const ACTIVE: &str = "active";
 /// Profile names, one per line, in the order `profile list` numbers them.
 pub const ORDER: &str = "order";
 
-pub fn state_file() -> PathBuf {
-    if let Ok(p) = std::env::var("XVPN_STATE") {
-        return PathBuf::from(p);
+/// `$XDG_CONFIG_HOME`, or `~/.config` when unset.
+fn config_home() -> PathBuf {
+    if let Some(dir) = env_var("XDG_CONFIG_HOME") {
+        return dir;
     }
-    PathBuf::from("/var/run/xvpn.current")
+    home().join(".config")
 }
 
-pub fn root() -> PathBuf {
-    // 1️⃣ Allow the user to force a specific root via env var.
-    if let Ok(dir) = std::env::var("XVPN_DIR") {
-        return PathBuf::from(dir);
+/// `$XDG_STATE_HOME`, or `~/.local/state` when unset.
+///
+/// Runtime state lives here rather than in `/var/run` because `/var/run` is
+/// root-owned, so a user-space supervisor could not write to it.
+fn state_home() -> PathBuf {
+    if let Some(dir) = env_var("XDG_STATE_HOME") {
+        return dir;
     }
+    home().join(".local").join("state")
+}
 
-    // 2️⃣ Try to infer the root from the binary location (project layout).
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/usr/local/bin/xvpn"));
-    let real = fs::canonicalize(&exe).unwrap_or(exe);
-    if let Some(candidate) = real.parent().and_then(|p| p.parent()) {
-        // Accept the candidate if it looks like an xvpn directory (has a mode file or a profiles dir).
-        if candidate.join(MODE).is_file() || candidate.join(PROFILES).is_dir() {
-            return candidate.to_path_buf();
+fn home() -> PathBuf {
+    #[cfg(unix)]
+    if let Some(dir) = sudo_user_home() {
+        return dir;
+    }
+    env_var("HOME").unwrap_or_else(|| PathBuf::from("."))
+}
+
+#[cfg(unix)]
+fn sudo_user_home() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let sudo_user = std::env::var_os("SUDO_USER")?;
+    let c_user = std::ffi::CString::new(sudo_user.as_bytes()).ok()?;
+    unsafe {
+        let pwd = libc::getpwnam(c_user.as_ptr());
+        if !pwd.is_null() && !(*pwd).pw_dir.is_null() {
+            let dir = std::ffi::CStr::from_ptr((*pwd).pw_dir);
+            if let Ok(dir_str) = dir.to_str() {
+                return Some(PathBuf::from(dir_str));
+            }
         }
     }
+    None
+}
 
-    // 3️⃣ Default installation layout – /usr/local/etc/xvpn.
-    let default_path = PathBuf::from("/usr/local/etc/xvpn");
+fn env_var(key: &str) -> Option<PathBuf> {
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
 
-    // 4️⃣ If we cannot write to the default location, fall back to a user‑writable directory.
-    // Attempt to create a temporary file to probe write permission.
-    let write_test = default_path.join(".xvpn_write_test");
-    let can_write = std::fs::OpenOptions::new()
+/// What the supervisor is currently doing, read by `xvpn` status.
+pub fn state_file() -> PathBuf {
+    if let Some(p) = env_var("XVPN_STATE") {
+        return p;
+    }
+    state_home().join("xvpn").join("current")
+}
+
+/// Held for the supervisor's lifetime. A second supervisor that cannot take it
+/// exits instead of reconciling the same root against the first one.
+pub fn lock_file() -> PathBuf {
+    if let Some(p) = env_var("XVPN_LOCK") {
+        return p;
+    }
+    state_home().join("xvpn").join("supervisor.lock")
+}
+
+/// Per-proxy log. Under the user's state dir so a non-root supervisor can
+/// always open it; `/var/log/xvpn-*.log` was root-owned and unwritable.
+pub fn log_file(program: &str) -> PathBuf {
+    state_home().join("xvpn").join(format!("{program}.log"))
+}
+
+/// Everything the tool keeps: config next to the binary's owner's dotfiles,
+/// runtime state under XDG.
+///
+/// Falls back to `~/.xvpn` when the primary root is not writable, so a
+/// read-only `~/.config` (a shared machine, a sandbox) does not strand state
+/// in a directory nobody can write to.
+pub fn root() -> PathBuf {
+    if let Some(dir) = env_var("XVPN_DIR") {
+        return dir;
+    }
+    let primary = config_home().join("xvpn");
+    if is_writable(&primary) {
+        primary
+    } else {
+        home().join(".xvpn")
+    }
+}
+
+/// True when a probe file can be created in `dir`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn is_writable(dir: &Path) -> bool {
+    let _ = fs::create_dir_all(dir);
+    let probe = dir.join(".xvpn_write_test");
+    let _ = fs::remove_file(&probe);
+    std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&write_test)
+        .open(&probe)
         .map(|f| {
-            // Clean up the test file right away.
-            let _ = std::fs::remove_file(&write_test);
             drop(f);
+            let _ = fs::remove_file(&probe);
             true
         })
-        .unwrap_or(false);
+        .unwrap_or(false)
+}
 
-    if can_write {
-        return default_path;
+/// Roots earlier versions could resolve to, kept only to explain a stale one.
+///
+/// Deliberately never `/usr/local` itself: that is a shared system directory,
+/// and treating it as an xvpn root is how state ended up in files like
+/// `/usr/local/mode` that no unprivileged command could rewrite.
+pub fn legacy_roots() -> Vec<PathBuf> {
+    [
+        PathBuf::from("/usr/local/etc/xvpn"),
+        PathBuf::from("/usr/local/xvpn"),
+        home().join(".xvpn"),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// Move state into the current root, copying from the first legacy root that
+/// has any. Copies rather than moves, so the old copy survives as a fallback.
+///
+/// Only the known filenames are considered. A blanket directory copy would be
+/// catastrophic if the legacy root resolved to something like `/usr/local`.
+pub fn migrate_state() -> crate::Result<Option<PathBuf>> {
+    let root = root();
+    let from = legacy_roots()
+        .into_iter()
+        .find(|old| *old != root && (old.join(MODE).is_file() || old.join(PROFILES).is_dir()))
+        .ok_or_else(|| "nothing to migrate: no state in any previous location".to_string())?;
+
+    fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
+    for name in [MODE, XRAY, CONF, ACTIVE, ORDER] {
+        let src = from.join(name);
+        if src.is_file() && !root.join(name).exists() {
+            fs::copy(&src, root.join(name)).map_err(|e| format!("{name}: {e}"))?;
+        }
     }
-
-    // 5️⃣ Fallback to $HOME/.xvpn (guaranteed to be writable by the user).
-    if let Ok(home) = std::env::var("HOME") {
-        let user_path = PathBuf::from(home).join(".xvpn");
-        let _ = std::fs::create_dir_all(&user_path);
-        return user_path;
+    // Profiles and the generated sidecars, recursively but shallowly.
+    for dir in [PROFILES, "modes"] {
+        let src = from.join(dir);
+        if src.is_dir() && !root.join(dir).exists() {
+            copy_tree(&src, &root.join(dir)).map_err(|e| format!("{dir}: {e}"))?;
+        }
     }
+    Ok(Some(from))
+}
 
-    // 6️⃣ As a last resort, just return the default (will likely fail, but we have no better choice).
-    default_path
+fn copy_tree(src: &Path, dest: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(src)?.flatten() {
+        let to = dest.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &to)?;
+        } else {
+            fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// One-time note about state left behind elsewhere. Reported, never moved.
+pub fn stale_root_notice() -> Option<String> {
+    if env_var("XVPN_DIR").is_some() {
+        return None;
+    }
+    let current = root();
+    if current.join(PROFILES).is_dir() || current.join(MODE).is_file() {
+        return None;
+    }
+    legacy_roots()
+        .into_iter()
+        .find(|old| old != &current && (old.join(MODE).is_file() || old.join(PROFILES).is_dir()))
+        .map(|old| {
+            format!(
+                "found xvpn state in {} but this build uses {}\n\
+                 run `xvpn migrate` to move it across",
+                old.display(),
+                current.display()
+            )
+        })
 }
 
 pub fn profiles_dir(root: &Path) -> PathBuf {
     root.join(PROFILES)
+}
+
+/// Whether this process runs as root.
+///
+/// Decides whether sing-box can bring up its tun interface: on macOS there is
+/// no TProxy, so `on` mode means `auto_route`, which needs privilege.
+pub fn is_root() -> bool {
+    // SAFETY: `geteuid` takes no arguments, cannot fail, and has no
+    // preconditions.
+    unsafe { libc::geteuid() == 0 }
 }
 
 pub fn active_file(root: &Path) -> PathBuf {
@@ -134,14 +277,7 @@ pub fn run(prog: &str, args: &[&str]) -> Result<()> {
     }
 }
 
-pub fn capture(prog: &str, args: &[&str]) -> Option<String> {
-    let out = output(prog, args).ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-fn output(prog: &str, args: &[&str]) -> Result<Output> {
+pub fn output(prog: &str, args: &[&str]) -> Result<Output> {
     Command::new(prog)
         .args(args)
         .stdin(Stdio::null())
@@ -157,7 +293,6 @@ pub fn check_with(tool: &str, args: &[OsString]) -> Result<()> {
     }
 }
 
-// xray reports errors on stdout, sing-box on stderr. Check both, drop banners.
 fn failure(out: &Output) -> String {
     for stream in [
         String::from_utf8_lossy(&out.stderr).to_string(),
@@ -211,7 +346,7 @@ fn pick_error(output: &str) -> Option<String> {
 // vless
 
 // `http`/h2 is absent on purpose: Xray removed HTTP/2 and folded it into XHTTP.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Transport {
     Tcp,
     Ws,
@@ -219,7 +354,7 @@ pub enum Transport {
     XHttp,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Security {
     None,
     Tls,
@@ -254,7 +389,6 @@ impl Link {
         if self.security != Security::Reality {
             return Ok(());
         }
-        // xray reports a bad key as `invalid "password"`, so catch it here.
         match self.param("pbk") {
             None | Some("") => return Err("reality link is missing `pbk`".into()),
             Some(k) if !valid_reality_key(k) => {
@@ -316,6 +450,7 @@ pub fn parse_link(link: &str) -> Result<Link> {
     let (host_port, query) = host_part
         .split_once('?')
         .map_or((host_part, ""), |(hp, q)| (hp, q));
+    let (query, _) = query.split_once('#').unwrap_or((query, ""));
     let (host, port) = match host_port.rsplit_once(':') {
         Some((h, p)) => (h.to_string(), p.parse().unwrap_or(443)),
         None => (host_port.to_string(), 443),
@@ -353,9 +488,14 @@ fn url_decode(s: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '%' {
             let hex: String = chars.by_ref().take(2).collect();
-            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                out.push(byte as char);
+            if hex.len() == 2 {
+                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                    out.push(byte as char);
+                    continue;
+                }
             }
+            out.push('%');
+            out.push_str(&hex);
         } else {
             out.push(c);
         }
@@ -369,7 +509,7 @@ pub const SOCKS_PORT: u16 = 10808;
 pub const HTTP_PORT: u16 = 10809;
 pub const TPROXY_PORT: u16 = 12345;
 
-pub fn xray_config(link: &Link) -> Value {
+pub fn xray_config(link: &Link, socks_port: u16, http_port: u16) -> Value {
     let mut user = json!({
         "id": &link.id,
         "encryption": link.param_or("encryption", "none"),
@@ -442,11 +582,11 @@ pub fn xray_config(link: &Link) -> Value {
         "inbounds": [
             {
                 "listen": "127.0.0.1",
-                "port": SOCKS_PORT,
+                "port": socks_port,
                 "protocol": "socks",
                 "settings": { "udp": true },
             },
-            { "listen": "127.0.0.1", "port": HTTP_PORT, "protocol": "http" },
+            { "listen": "127.0.0.1", "port": http_port, "protocol": "http" },
         ],
         "outbounds": [
             {
@@ -477,6 +617,24 @@ pub fn check_xray(path: &Path) -> Result<()> {
 
 pub fn server_of(config: &Value) -> Option<&str> {
     config["outbounds"][0]["settings"]["vnext"][0]["address"].as_str()
+}
+
+pub fn direct_xray_config(socks_port: u16, http_port: u16) -> Value {
+    json!({
+        "log": { "loglevel": "warning" },
+        "inbounds": [
+            {
+                "listen": "127.0.0.1",
+                "port": socks_port,
+                "protocol": "socks",
+                "settings": { "udp": true },
+            },
+            { "listen": "127.0.0.1", "port": http_port, "protocol": "http" },
+        ],
+        "outbounds": [
+            { "tag": "direct", "protocol": "freedom" },
+        ],
+    })
 }
 
 // sing-box
@@ -541,10 +699,6 @@ pub fn singbox_config(scope: Scope, ingress: Ingress) -> Value {
     })
 }
 
-/// A rule the user added, as opposed to one `singbox_config` generates.
-///
-/// Both rule kinds must survive a rewrite, otherwise `repair` / `import` /
-/// `profile use` silently drop whatever the user routed.
 fn is_user_rule(rule: &Value) -> bool {
     rule.get("process_path_regex").is_some() || rule.get("domain_suffix").is_some()
 }
