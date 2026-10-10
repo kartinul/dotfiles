@@ -245,7 +245,7 @@ pub fn dispatch(cli: Cli) {
             } else if cli.index > 0 {
                 commands::use_profile(&root, cli.index)
             } else {
-                commands::status(&root)
+                commands::use_profile(&root, 0)
             }
         }
         Some(Command::Set { mode }) => commands::set_mode(&root, mode),

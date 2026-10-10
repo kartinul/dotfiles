@@ -354,12 +354,15 @@ pub fn print_list(root: &Path) -> Result<()> {
     let profiles = list(root);
     let active = active_name(root);
     if profiles.is_empty() {
-        out::status("→", "no profiles yet. add one with `xvpn import 'vless://...'`");
+        out::status(
+            "→",
+            "no profiles yet. add one with `xvpn import 'vless://...'`",
+        );
         return Ok(());
     }
 
     // Prepare data for the table
-    let header = vec!["", "ID", "name", "server"];
+    let header = ["", "ID", "name", "server"];
 
     // We need to store the owned strings so they live long enough for the table call
     let mut storage: Vec<Vec<String>> = Vec::new();
@@ -373,7 +376,10 @@ pub fn print_list(root: &Path) -> Result<()> {
         };
         let index = (i + 1).to_string();
         let name = p.name.clone();
-        let server = p.server.clone().unwrap_or_else(|| "(unreadable)".to_string());
+        let server = p
+            .server
+            .clone()
+            .unwrap_or_else(|| "(unreadable)".to_string());
 
         storage.push(vec![marker.to_string(), index, name, server]);
     }

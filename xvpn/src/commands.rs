@@ -2,10 +2,10 @@
 
 use std::fs;
 use std::io::{self, Write};
+use std::net::TcpStream;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-use std::net::TcpStream;
 
 use crate::cli::{apps_args, sites_args, AppsAction, Mode, ProfileCmd, SitesAction};
 use crate::config::{self, Ingress, Scope};
@@ -24,7 +24,9 @@ fn stop_running_proxies() {
     let _ = Command::new("pkill").args(["-x", "xray"]).status();
     // sing-box in `on` mode runs as root on macOS (tun needs root)
     let _ = Command::new("pkill").args(["-x", "sing-box"]).status();
-    let _ = Command::new("sudo").args(["-n", "pkill", "-x", "sing-box"]).status();
+    let _ = Command::new("sudo")
+        .args(["-n", "pkill", "-x", "sing-box"])
+        .status();
     // Clear published state
     let _ = std::fs::remove_file(crate::config::state_file());
 }
@@ -120,11 +122,14 @@ pub fn status(root: &Path) -> Result<()> {
 /// Move state out of a root an older build resolved to.
 pub fn migrate() -> Result<()> {
     match config::migrate_state()? {
-        Some(from) => out::status("✓", &format!(
-            "migrated state from {} to {}",
-            from.display(),
-            config::root().display()
-        )),
+        Some(from) => out::status(
+            "✓",
+            &format!(
+                "migrated state from {} to {}",
+                from.display(),
+                config::root().display()
+            ),
+        ),
         None => out::status("→", "nothing to migrate"),
     }
     Ok(())
@@ -143,7 +148,12 @@ fn print_routing(root: &Path) {
     let sites = network::site_names(&cfg);
 
     out::section("always proxied (built in):");
-    out::list(&config::PROXY_TOOLS.iter().map(|s| s.as_ref()).collect::<Vec<_>>());
+    out::list(
+        &config::PROXY_TOOLS
+            .iter()
+            .map(|s| s.as_ref())
+            .collect::<Vec<_>>(),
+    );
 
     if !apps.is_empty() {
         out::section("apps:");
@@ -362,7 +372,10 @@ fn edit_site(root: &Path, add: bool, site: &str) -> Result<()> {
 fn announce_edit(result: Result<()>, add: bool, name: &str) -> Result<()> {
     match result {
         Ok(()) => {
-            out::status(if add { "✓" } else { "✓" }, &format!("{} {}", if add { "Added" } else { "Removed" }, name));
+            out::status(
+                if add { "✓" } else { "✗" },
+                &format!("{} {}", if add { "Added" } else { "Removed" }, name),
+            );
             Ok(())
         }
         Err(e) if network::is_noop(&e) => {
@@ -566,7 +579,9 @@ pub fn reset(root: &Path) -> Result<()> {
     for name in [config::XRAY, config::CONF, config::ACTIVE, config::ORDER] {
         match fs::remove_file(root.join(name)) {
             Ok(()) => out::status("✓", &format!("deleted {name}")),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => out::status("→", &format!("{name}: already absent")),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                out::status("→", &format!("{name}: already absent"))
+            }
             Err(e) => out::status("✗", &format!("could not delete {name}: {e}")),
         }
     }
@@ -773,7 +788,7 @@ fn run_make(target: &str) -> Result<()> {
         .map_err(|e| format!("make {target} failed: {e}"))?;
 
     if !status.success() {
-        return Err(format!("make {target} exited with {status}").into());
+        return Err(format!("make {target} exited with {status}"));
     }
     Ok(())
 }

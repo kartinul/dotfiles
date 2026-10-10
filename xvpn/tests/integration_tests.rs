@@ -82,13 +82,13 @@ fn test_xray_config_generation_and_local_port_binding() {
     let link_str = "vless://abc-123@127.0.0.1:443?type=ws&security=tls&sni=127.0.0.1#test-profile";
     let parsed = config::parse_link(link_str).unwrap();
 
-    // Generate config
-    let mut xray_cfg = config::xray_config(&parsed);
-
     // Ensure we run on isolated high test ports to avoid any collision
     // with running production/user instances of xvpn!
     let test_socks_port = 19808;
     let test_http_port = 19809;
+
+    // Generate config
+    let mut xray_cfg = config::xray_config(&parsed, test_socks_port, test_http_port);
 
     xray_cfg["inbounds"] = serde_json::json!([
         {
