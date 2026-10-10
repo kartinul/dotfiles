@@ -15,6 +15,20 @@ use crate::profiles;
 use crate::supervisor;
 use crate::{Error, Result};
 
+/// Best-effort stop of any xray/sing-box processes this user owns.
+/// Does not require the supervisor lock; called by `set_mode off` so
+/// `xvpn off` works even when no supervisor is running.
+fn stop_running_proxies() {
+    use std::process::Command;
+    // xray always runs as the user
+    let _ = Command::new("pkill").args(["-x", "xray"]).status();
+    // sing-box in `on` mode runs as root on macOS (tun needs root)
+    let _ = Command::new("pkill").args(["-x", "sing-box"]).status();
+    let _ = Command::new("sudo").args(["-n", "pkill", "-x", "sing-box"]).status();
+    // Clear published state
+    let _ = std::fs::remove_file(crate::config::state_file());
+}
+
 pub fn use_profile(root: &Path, index: u16) -> Result<()> {
     profiles::migrate_legacy(root)?;
     if index == 0 {
@@ -33,9 +47,26 @@ pub fn use_profile(root: &Path, index: u16) -> Result<()> {
         })?;
     profiles::activate(root, &name)?;
     out::status("✓", &format!("active profile: {name}"));
-    out::kv("mode", &mode);
-    refresh_sidecars(root)?;
-    out::status("→", "supervisor will reload");
+
+    // Quick-change: if mode is off, turn it on (default mode)
+    let target_mode = if mode == "off" {
+        Mode::Default
+    } else {
+        // Keep current mode
+        match mode.as_str() {
+            "on" => Mode::On,
+            "default" => Mode::Default,
+            _ => Mode::Default, // unset or unknown -> default
+        }
+    };
+
+    if target_mode.as_str() != mode {
+        set_mode(root, target_mode)?;
+    } else {
+        out::kv("mode", &mode);
+        refresh_sidecars(root)?;
+        out::status("→", "supervisor will reload");
+    }
     Ok(())
 }
 
@@ -135,6 +166,10 @@ pub fn set_mode(root: &Path, mode: Mode) -> Result<()> {
     fs::write(&path, mode).map_err(|e| format!("writing mode: {e}"))?;
     let written = std::time::SystemTime::now();
     out::kv("mode", mode);
+
+    if mode == "off" {
+        stop_running_proxies();
+    }
 
     if !supervisor::is_running() {
         out::warn("no supervisor is running, so nothing was applied");

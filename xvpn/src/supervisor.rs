@@ -440,6 +440,9 @@ pub fn supervise(root: &Path) -> Result<()> {
 
     log("shutting down");
     stop_all(&mut running);
+    // Reset mode to off when supervisor stops to indicate no active routing
+    let mode_path = root.join(config::MODE);
+    let _ = fs::write(&mode_path, b"off\n");
     let _ = fs::remove_file(state_path());
     log("stopped");
     Ok(())

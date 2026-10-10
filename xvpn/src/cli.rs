@@ -47,14 +47,6 @@ pub enum Command {
         /// Domain, required for set and remove. Covers subdomains too.
         site: Option<String>,
     },
-    /// Import a vless:// link into the active profile
-    Import {
-        /// vless:// link (prompts if omitted)
-        link: Option<String>,
-        /// Overwrite the profile if it already exists
-        #[arg(long)]
-        force: bool,
-    },
     /// Manage named VPN profiles
     #[command(subcommand)]
     Profile(ProfileCmd),
@@ -62,11 +54,7 @@ pub enum Command {
     // Selective routing on current network
     /// Use selective routing on the network you are on now
     Use,
-    /// Alias for `sites remove`
-    Forget {
-        /// Resolver to forget; defaults to the current network's
-        dns: Option<String>,
-    },
+
     /// Alias for `set on`
     #[command(hide = true)]
     On,
@@ -95,8 +83,6 @@ pub enum Command {
     Logs,
     /// Rewrite sing-box configs onto the current schema
     Repair,
-    /// Move state out of a directory an older build used
-    Migrate,
     /// Delete generated configs and restore stock defaults
     Reset,
 
@@ -271,20 +257,17 @@ pub fn dispatch(cli: Cli) {
         Some(Command::Sites { action, site }) => commands::sites(&root, action, site),
         Some(Command::Add { app }) => commands::add_app(&root, &app),
         Some(Command::Remove { app }) => commands::remove_app(&root, &app),
-        Some(Command::Import { link, force }) => commands::import(&root, link.as_deref(), force),
         Some(Command::Profile(cmd)) => commands::profile(&root, cmd),
         Some(Command::Use) => commands::use_network(&root, true, None),
-        Some(Command::Forget { dns }) => commands::use_network(&root, false, dns.as_deref()),
-
-        Some(Command::Check) => commands::check_vpn(&root),
-        Some(Command::Logs) => commands::logs(),
-        Some(Command::Repair) => commands::repair(&root),
-        Some(Command::Migrate) => commands::migrate(),
-        Some(Command::Reset) => commands::reset(&root),
         Some(Command::Supervise) => {
             commands::run(crate::supervisor::supervise(&root));
             return;
         }
+
+        Some(Command::Check) => commands::check_vpn(&root),
+        Some(Command::Logs) => commands::logs(),
+        Some(Command::Repair) => commands::repair(&root),
+        Some(Command::Reset) => commands::reset(&root),
         Some(Command::Agent { cmd }) => {
             let cmd = cmd.unwrap_or(AgentCmd::Install);
             commands::agent(cmd, &root)
